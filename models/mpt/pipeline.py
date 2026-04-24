@@ -137,21 +137,29 @@ class StoreCrossAttnProcessor:
     Custom AttentionProcessor that captures the true cross-attention
     probability map (post-softmax) during a per-concept forward pass.
 
-    This replaces the fragile forward hook on .attn2 output, which
-    in diffusers captures hidden_states, NOT attention_probs.
+    Captures attention_probs shape: [batch*heads, query_positions, key_tokens]
+    - query_positions: latent spatial positions (for F_cover)
+    - key_tokens: text token positions       (for F_token)
 
-    PDF definition: Σ_attn(i,j) = <A_{t,i}, A_{t,j}>
-    where A_{t,i} is the NORMALIZED (softmax) cross-attention map.
+    P1 FIX: Added input_ndim==4 reshape, prepare_attention_mask, and
+    rescale_output_factor for compatibility across diffusers versions.
     """
 
     def __init__(self, store: dict, concept_idx: int):
-        self.store = store        # reference to concept_data dict
+        self.store = store
         self.concept_idx = concept_idx
 
     def __call__(self, attn, hidden_states, encoder_hidden_states=None,
                  attention_mask=None, **kwargs):
         residual = hidden_states
         is_cross = encoder_hidden_states is not None
+
+        # P1 FIX: handle 4-D spatial input (used in some UNet blocks)
+        input_ndim = hidden_states.ndim
+        if input_ndim == 4:
+            batch_size, channel, height, width = hidden_states.shape
+            hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
 
@@ -163,17 +171,29 @@ class StoreCrossAttnProcessor:
         key   = attn.head_to_batch_dim(key)
         value = attn.head_to_batch_dim(value)
 
-        # Capture TRUE attention probability map (post-softmax) for cross-attn only
+        # P1 FIX: use prepare_attention_mask for proper masking across versions
+        if attention_mask is not None:
+            attention_mask = attn.prepare_attention_mask(attention_mask, query.shape[1], query.shape[0])
+
+        # Capture TRUE attention probability map [BH, Q, K] for cross-attn only
         attention_probs = attn.get_attention_scores(query, key, attention_mask)
         if is_cross:
-            self.store.setdefault(self.concept_idx, {}).setdefault("attn_maps", []).append(
-                attention_probs.detach().float().cpu()
-            )
+            # Store only the mean over heads to save memory: [Q, K]
+            compressed = attention_probs.mean(dim=0).float().cpu()  # [Q, K]
+            self.store.setdefault(self.concept_idx, {}).setdefault("attn_maps", []).append(compressed)
 
         hidden_states = torch.bmm(attention_probs, value)
         hidden_states = attn.batch_to_head_dim(hidden_states)
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)
+
+        # P1 FIX: apply rescale_output_factor if present
+        if hasattr(attn, "rescale_output_factor") and attn.rescale_output_factor != 1.0:
+            hidden_states = hidden_states / attn.rescale_output_factor
+
+        # P1 FIX: restore 4-D shape
+        if input_ndim == 4:
+            hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
 
         if getattr(attn, "residual_connection", False):
             hidden_states = hidden_states + residual
@@ -224,60 +244,83 @@ class PerConceptAttentionCache:
 
     @staticmethod
     def compute_token_activation(attn_maps_list, prompt_indices=None):
-        """Compute per-token activation strength from collected attention maps."""
+        """
+        Compute per-token activation strength.
+
+        P0 FIX: attention_probs stored as [Q, K] (mean over heads already done in processor).
+        Token activation = average attention over Q positions, for selected K (token) indices.
+        """
         if not attn_maps_list:
             return 0.0
-        
-        total_act = 0.0
-        count = 0
+
+        vals = []
         for amap in attn_maps_list:
             if amap is None or not isinstance(amap, torch.Tensor):
                 continue
-            if amap.dim() == 4:
-                pooled = amap.mean(dim=0).mean(dim=0)
+            if amap.dim() == 2:
+                # [Q, K] — correct shape from StoreCrossAttnProcessor
+                # token_scores[k] = mean attention from all spatial positions to token k
+                token_scores = amap.mean(dim=0)  # [K]
             elif amap.dim() == 3:
-                pooled = amap.mean(dim=0)
+                # Fallback: [BH, Q, K] — pool over BH and Q to get [K]
+                token_scores = amap.mean(dim=(0, 1))  # [K]
             else:
                 continue
-            
-            token_importance = pooled
-            
+
             if prompt_indices is not None and len(prompt_indices) > 0:
-                idx_valid = [ii for ii in prompt_indices if ii < token_importance.shape[0]]
+                idx_valid = [ii for ii in prompt_indices if ii < token_scores.shape[0]]
                 if idx_valid:
-                    total_act += token_importance[idx_valid].mean().item()
+                    vals.append(token_scores[idx_valid].mean().item())
                 else:
-                    total_act += token_importance.mean().item()
+                    vals.append(token_scores.mean().item())
             else:
-                total_act += token_importance.mean().item()
-            count += 1
-        
-        return total_act / max(count, 1)
+                vals.append(token_scores.mean().item())
+
+        return float(sum(vals) / max(len(vals), 1))
 
     @staticmethod
-    def compute_spatial_coverage(attn_maps_list):
-        """Compute spatial coverage: fraction of spatial positions above threshold."""
+    def compute_spatial_coverage(attn_maps_list, prompt_indices=None):
+        """
+        Compute spatial coverage: fraction of query (spatial) positions above mean.
+
+        P0 FIX: attention_probs stored as [Q, K]. Spatial coverage is over Q dimension.
+        Optionally restrict to concept token positions in K dimension.
+        """
         if not attn_maps_list:
             return 0.0
-        
-        total_cov = 0.0
-        count = 0
+
+        vals = []
         for amap in attn_maps_list:
             if amap is None or not isinstance(amap, torch.Tensor):
                 continue
-            if amap.dim() == 4:
-                spatial = amap.mean(dim=[0, 1, 2])
+            if amap.dim() == 2:
+                # [Q, K] — select concept tokens if available, then pool over K
+                if prompt_indices is not None and len(prompt_indices) > 0:
+                    idx_valid = [ii for ii in prompt_indices if ii < amap.shape[-1]]
+                    if idx_valid:
+                        spatial_scores = amap[:, idx_valid].mean(dim=1)  # [Q]
+                    else:
+                        spatial_scores = amap.mean(dim=1)  # [Q]
+                else:
+                    spatial_scores = amap.mean(dim=1)  # [Q]
             elif amap.dim() == 3:
-                spatial = amap.mean(dim=[0, 1])
+                # Fallback: [BH, Q, K]
+                if prompt_indices is not None and len(prompt_indices) > 0:
+                    idx_valid = [ii for ii in prompt_indices if ii < amap.shape[-1]]
+                    if idx_valid:
+                        spatial_scores = amap[:, :, idx_valid].mean(dim=(0, 2))  # [Q]
+                    else:
+                        spatial_scores = amap.mean(dim=(0, 2))  # [Q]
+                else:
+                    spatial_scores = amap.mean(dim=(0, 2))  # [Q]
             else:
                 continue
-            
-            threshold = spatial.mean()
-            coverage = (spatial > threshold).float().mean().item()
-            total_cov += coverage
-            count += 1
-        
-        return total_cov / max(count, 1)
+
+            threshold = spatial_scores.mean()
+            coverage = (spatial_scores > threshold).float().mean().item()
+            vals.append(coverage)
+
+        return float(sum(vals) / max(len(vals), 1))
 
     def compute_attn_overlap_matrix(self, n_concepts):
         """Compute Σ^attn: pairwise inner product of attention maps between concepts."""
@@ -320,11 +363,12 @@ class PerConceptAttentionCache:
         maps = self.concept_data[concept_idx].get("attn_maps", [])
         return self.compute_token_activation(maps, prompt_indices)
 
-    def get_concept_coverage(self, concept_idx):
+    def get_concept_coverage(self, concept_idx, prompt_indices=None):
+        """P0 FIX: accept prompt_indices so spatial coverage uses concept tokens only."""
         if concept_idx not in self.concept_data:
             return 0.0
         maps = self.concept_data[concept_idx].get("attn_maps", [])
-        return self.compute_spatial_coverage(maps)
+        return self.compute_spatial_coverage(maps, prompt_indices)
 
     def clear(self):
         self.concept_data.clear()
@@ -395,6 +439,11 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             scores: list of floats, one per prompt
         """
         scores = []
+        # P1 FIX: dynamically follow UNet device at runtime (handles pipe.to(device) after __init__)
+        _unet_dev = next(self.unet.parameters()).device
+        if _unet_dev != self._clip_device:
+            self.clip_model = self.clip_model.to(_unet_dev)
+            self._clip_device = _unet_dev
         _dev = self._clip_device
         for p in prompts_list:
             clip_inputs = clip_processor(
@@ -455,7 +504,9 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         fcover = np.ones(n)
         if attn_cache is not None:
             for j in range(n):
-                fcover[j] = attn_cache.get_concept_coverage(j)
+                # P0 FIX: pass prompt_indices so coverage uses correct concept token positions
+                pidx = prompt_token_indices[j] if (prompt_token_indices is not None and j < len(prompt_token_indices)) else None
+                fcover[j] = attn_cache.get_concept_coverage(j, pidx)
             if fcover.max() > fcover.min():
                 fcover = (fcover - fcover.min()) / (fcover.max() - fcover.min() + 1e-8)
 
@@ -662,7 +713,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
 
     def _compute_regularization(
         self, w: np.ndarray, w_prev: np.ndarray, state_scores: List[float],
-        predicted_scores: List[float],
+        lookahead_proxy: List[float],
         step_idx: int, num_steps: int, config: dict
     ) -> float:
         """
@@ -683,14 +734,15 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         # PDF defines q_t,i(w_t) = F_i(x_hat_{t-1}(w_t)), which is expensive to compute.
         # Surrogate: q_i(w) = state_scores_i + w_i * lookahead_proxy_i
         # This preserves the Var(q(w)) form and makes R_bal differentiable in w.
-        if predicted_scores is not None and len(predicted_scores) == n:
-            q_base = np.array(predicted_scores, dtype=np.float64)
+        # P1 FIX: parameter renamed predicted_scores -> lookahead_proxy for clarity.
+        # q_i(w) = state_scores_i + w_i * lookahead_proxy_i  (surrogate of PDF q_t,i(w_t))
+        state_arr = np.array(state_scores, dtype=np.float64)
+        if lookahead_proxy is not None and len(lookahead_proxy) == n:
+            marginal = np.array(lookahead_proxy, dtype=np.float64)
         else:
-            q_base = np.array(state_scores, dtype=np.float64)
-        # Approximate lookahead contribution per concept using w (proxy for marginal gain)
+            marginal = np.zeros_like(state_arr)
         w_arr = np.array(w, dtype=np.float64)
-        deficiency = np.clip(1.0 - q_base, 0.0, 1.0)
-        q_surrogate = np.clip(q_base + w_arr * deficiency, 0.0, 1.0)
+        q_surrogate = np.clip(state_arr + w_arr * marginal, 0.0, 1.0)
         R_bal = float(np.var(q_surrogate))  # Var(q(w)) — depends on w via q_surrogate
 
         # --- Entropy: H(w) = -Σ w·log(w) ---
@@ -708,7 +760,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
 
     def _mirror_descent_solver(
         self, mu: List[float], Sigma: np.ndarray, state_scores: List[float],
-        predicted_scores: List[float],
+        lookahead_proxy: List[float],
         w_prev: np.ndarray, step_idx: int, num_steps: int, config: dict
     ) -> np.ndarray:
         """
@@ -742,7 +794,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             grad_risk = 2.0 * lambda_r * Sigma.dot(w)
             
             # Regularization gradients (approximate for mirror descent)
-            reg = self._compute_regularization(w, w_prev, state_scores, predicted_scores, step_idx, num_steps, config)
+            reg = self._compute_regularization(w, w_prev, state_scores, lookahead_proxy, step_idx, num_steps, config)
             
             # Approximate gradient of regularization
             grad_reg = np.zeros(n)
@@ -751,7 +803,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
                 w_plus = w.copy()
                 w_plus[k] += eps_fd
                 w_plus = np.clip(w_plus, 1e-8, None); w_plus /= w_plus.sum()
-                reg_plus = self._compute_regularization(w_plus, w_prev, state_scores, predicted_scores, step_idx, num_steps, config)
+                reg_plus = self._compute_regularization(w_plus, w_prev, state_scores, lookahead_proxy, step_idx, num_steps, config)
                 grad_reg[k] = (reg_plus - reg) / eps_fd
 
             total_grad = grad_return + grad_risk + grad_reg
@@ -1011,15 +1063,16 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
                     embed_j = concept_embeddings[j].unsqueeze(0)
 
                 # Capture true cross-attention probability maps via AttentionProcessor
+                # P0 FIX: wrap in try/finally so processors are ALWAYS restored even on error
                 if enable_attn:
                     attn_cache.start_capture(self.unet, j)
-
-                noise_j = self.unet(
-                    latent_model_input, t, encoder_hidden_states=embed_j
-                ).sample
-
-                if enable_attn:
-                    attn_cache.stop_capture(self.unet)  # restore original processors
+                try:
+                    noise_j = self.unet(
+                        latent_model_input, t, encoder_hidden_states=embed_j
+                    ).sample
+                finally:
+                    if enable_attn:
+                        attn_cache.stop_capture(self.unet)  # always restore processors
 
                 if do_classifier_free_guidance:
                     nu_j, nj = noise_j.chunk(2)
@@ -1040,9 +1093,11 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             )
 
             # ---- Step 6: Solve optimization via mirror descent ----
+            # P1 FIX: pass mu as lookahead_proxy surrogate to R_bal (mu already encodes
+            # per-concept expected gain including lookahead_proxy component)
             w_optimal = self._mirror_descent_solver(
                 mu=mu, Sigma=Sigma, state_scores=state_scores,
-                predicted_scores=state_scores,
+                lookahead_proxy=list(mu),
                 w_prev=w_prev, step_idx=i, num_steps=num_inference_steps,
                 config=cfg,
             )
