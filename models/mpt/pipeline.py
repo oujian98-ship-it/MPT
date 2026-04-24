@@ -17,6 +17,7 @@ Key differences vs Black-Scholes pipeline:
   - MPT: soft allocation via continuous weights on simplex
 """
 import inspect
+import math
 import warnings
 from typing import List, Optional, Union, Dict, Callable
 from contextlib import contextmanager
@@ -66,9 +67,15 @@ def preprocess(image):
     return 2.0 * image - 1.0
 
 
+def _norm_cdf(x: float) -> float:
+    """Standard normal CDF via math.erf (no scipy dependency)."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
 def bs_score(spot, strike, rate, sigma, t):
-    """Black-Scholes score.
-    FIX: use the strike parameter (was hardcoded to 100); guard edge cases.
+    """Black-Scholes European call option price.
+    FIX (P0): Use norm CDF Φ(d) instead of the Gaussian PDF exp(-d²/2).
+    FIX: Use per-prompt strike price (not hardcoded); guard edge cases.
     S and K should both be on the ×100 scale (per PDF Page 4).
     """
     spot_val = float(spot[0, 0])
@@ -80,9 +87,8 @@ def bs_score(spot, strike, rate, sigma, t):
     strike_val = max(float(strike), 1e-6)
     d1 = (np.log(spot_val / strike_val) + (rate + (sigma_val ** 2) / 2) * t_val) / (sigma_val * t_val ** 0.5)
     d2 = d1 - sigma_val * t_val ** 0.5
-    bs_score_val = (np.exp(-0.5 * d1 * d1)) * spot_val - (
-        np.exp(-0.5 * d2 * d2) * strike_val * np.exp(-rate * t_val)
-    )
+    # C = S·Φ(d1) − K·e^{−rT}·Φ(d2)  (Black-Scholes call price)
+    bs_score_val = spot_val * _norm_cdf(d1) - strike_val * math.exp(-rate * t_val) * _norm_cdf(d2)
     return bs_score_val
 
 
@@ -105,7 +111,7 @@ DEFAULT_MPT_CONFIG = {
     "gamma_bal": 0.1,          # γ: 平衡惩罚（概念间方差）
     "tau_ent": 0.05,           # τ: 熵正则（防坍缩）
     # --- Time smoothing ---
-    "eta_max": 0.1,            # η_max: 时间平滑最大系数 (PDF: η_t = η_max*(step/T)^p)
+    "eta_max": 0.1,            # η_max: 时间平滑最大系数
     "eta_power": 1.0,          # p: 调度指数
     # --- Solver ---
     "rho": 0.5,                # ρ: 镜像下降学习率
@@ -350,7 +356,9 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             clip_inputs["input_ids"] = clip_inputs["input_ids"].cuda()
             clip_inputs["attention_mask"] = clip_inputs["attention_mask"].cuda()
             clip_out = clip_model(**clip_inputs)
-            score = clip_out.logits_per_image.abs().cpu().detach().numpy()
+            # FIX (P0): Do NOT take .abs() — negative logits mean the image does NOT
+            # match the prompt. Preserving the sign is critical for correct urgency ranking.
+            score = clip_out.logits_per_image.cpu().detach().numpy()
             scores.append(float(score[0, 0]) if score.ndim > 1 else float(score))
         return scores
 
@@ -616,12 +624,15 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         n = len(w)
         eps = 1e-10
 
-        # --- R_bal: Var of per-concept predicted satisfaction q_{t,i} (Bug 3 fix) ---
+        # --- R_bal: Var of weighted satisfaction w_i·q_i (FIX P0: must depend on w) ---
+        # If q_arr is independent of w, its gradient w.r.t. w is zero and the
+        # balance penalty has NO effect on the optimizer. Using w*q makes it
+        # differentiable in w so the finite-difference gradient is non-zero.
         if predicted_scores is not None and len(predicted_scores) == n:
             q_arr = np.array(predicted_scores, dtype=np.float64)
         else:
             q_arr = np.array(state_scores, dtype=np.float64)
-        R_bal = float(np.var(q_arr))  # Var(q_i), NOT Var(w_i·q_i)
+        R_bal = float(np.var(w * q_arr))  # Var(w_i·q_i) — depends on w ✓
 
         # --- Entropy: H(w) = -Σ w·log(w) ---
         w_safe = np.clip(w, eps, None)
@@ -728,7 +739,9 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         # Parse prompts: eval_prompt should be [main_prompt, sub_prompt1, sub_prompt2, ...]
         # For MPT we use sub-prompts as our "portfolio" assets
         prompt_main = eval_prompt[0]  # main compositional prompt (for reference)
-        concept_prompts = eval_prompt[1:3]  # 与BS一致：只用[1]交换 + [2]概念A
+        # FIX (P1): Remove hardcoded [1:3] slice — use ALL supplied sub-concepts so
+        # the portfolio truly supports N assets, not just 2.
+        concept_prompts = eval_prompt[1:]  # all sub-concepts after the main prompt
         n_concepts = len(concept_prompts)
 
         print(f"[MPT] Portfolio size: {n_concepts} concepts")
