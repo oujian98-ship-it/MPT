@@ -182,8 +182,19 @@ class StoreCrossAttnProcessor:
         # Capture TRUE attention probability map [BH, Q, K] for cross-attn only
         attention_probs = attn.get_attention_scores(query, key, attention_mask)
         if is_cross:
+            # P0 FIX: handle CFG where batch_size >= 2 (uncond + cond).
+            # We must only capture the CONDITIONAL attention map to avoid dilution.
+            bh, q_len, k_len = attention_probs.shape
+            num_heads = bh // batch_size_orig
+            
+            # Reshape to [batch, heads, Q, K]
+            attn_reshaped = attention_probs.view(batch_size_orig, num_heads, q_len, k_len)
+            
+            # In CFG, the conditional embedding is usually the second half (-1)
+            cond_probs = attn_reshaped[-1]  # [heads, Q, K]
+            
             # Store only the mean over heads to save memory: [Q, K]
-            compressed = attention_probs.mean(dim=0).float().cpu()  # [Q, K]
+            compressed = cond_probs.mean(dim=0).float().cpu()  # [Q, K]
             self.store.setdefault(self.concept_idx, {}).setdefault("attn_maps", []).append(compressed)
 
         hidden_states = torch.bmm(attention_probs, value)
