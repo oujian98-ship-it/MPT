@@ -163,17 +163,21 @@ class StoreCrossAttnProcessor:
         if encoder_hidden_states is None:
             encoder_hidden_states = hidden_states
 
+        batch_size_orig = hidden_states.shape[0]
+        sequence_length = hidden_states.shape[1]
+
         query = attn.to_q(hidden_states)
         key   = attn.to_k(encoder_hidden_states)
         value = attn.to_v(encoder_hidden_states)
 
+        # P0 FIX: use prepare_attention_mask BEFORE head_to_batch_dim
+        # to ensure the mask shape aligns with the original batch_size
+        if attention_mask is not None:
+            attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size_orig)
+
         query = attn.head_to_batch_dim(query)
         key   = attn.head_to_batch_dim(key)
         value = attn.head_to_batch_dim(value)
-
-        # P1 FIX: use prepare_attention_mask for proper masking across versions
-        if attention_mask is not None:
-            attention_mask = attn.prepare_attention_mask(attention_mask, query.shape[1], query.shape[0])
 
         # Capture TRUE attention probability map [BH, Q, K] for cross-attn only
         attention_probs = attn.get_attention_scores(query, key, attention_mask)
@@ -322,8 +326,12 @@ class PerConceptAttentionCache:
 
         return float(sum(vals) / max(len(vals), 1))
 
-    def compute_attn_overlap_matrix(self, n_concepts):
-        """Compute Σ^attn: pairwise inner product of attention maps between concepts."""
+    def compute_attn_overlap_matrix(self, n_concepts, prompt_token_indices=None):
+        """
+        Compute Σ^attn: pairwise inner product of attention maps between concepts.
+        P1 FIX: Overlap is computed using ONLY the concept tokens' spatial maps,
+        preventing dilution by BOS/EOS/padding tokens.
+        """
         import numpy as np
         Sigma_attn = np.zeros((n_concepts, n_concepts))
         
@@ -334,14 +342,33 @@ class PerConceptAttentionCache:
             maps = self.concept_data[ci].get("attn_maps", [])
             if not maps:
                 continue
+            
+            idx = None
+            if prompt_token_indices is not None and ci < len(prompt_token_indices):
+                idx = prompt_token_indices[ci]
+
             parts = []
             for m in maps:
-                flat = m.numpy().flatten()
-                norm = np.linalg.norm(flat)
-                if norm > 1e-8:
-                    parts.append(flat / norm)
+                if m.dim() != 2:  # Expected [Q, K] from processor
+                    continue
+                
+                # Filter to only the concept token indices if available
+                if idx is not None and len(idx) > 0:
+                    idx_valid = [k for k in idx if k < m.shape[-1]]
+                    if idx_valid:
+                        spatial_vec = m[:, idx_valid].mean(dim=1)  # [Q]
+                    else:
+                        spatial_vec = m.mean(dim=1)
                 else:
-                    parts.append(np.zeros_like(flat))
+                    spatial_vec = m.mean(dim=1)
+
+                spatial_vec = spatial_vec.numpy()
+                norm = np.linalg.norm(spatial_vec)
+                if norm > 1e-8:
+                    parts.append(spatial_vec / norm)
+                else:
+                    parts.append(np.zeros_like(spatial_vec))
+
             if parts:
                 concept_vectors[ci] = np.concatenate(parts)
         
@@ -633,6 +660,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         sigma_t: float,
         step_index: int,
         config: dict,
+        prompt_token_indices: Optional[List[List[int]]] = None,
     ) -> np.ndarray:
         """
         Compute risk covariance matrix Sigma_t (FIXED v2).
@@ -655,7 +683,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         # --- FIX 1: Sigma^attn via PerConceptAttentionCache ---
         if attn_cache is not None and b1 > 0:
             try:
-                Sigma_attn = attn_cache.compute_attn_overlap_matrix(n)
+                Sigma_attn = attn_cache.compute_attn_overlap_matrix(n, prompt_token_indices)
                 Sigma += b1 * Sigma_attn
             except Exception:
                 pass
@@ -1090,6 +1118,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
                 state_scores_history,
                 state_scores,
                 sigma_t, i, cfg,
+                prompt_token_indices=prompt_token_indices,
             )
 
             # ---- Step 6: Solve optimization via mirror descent ----
