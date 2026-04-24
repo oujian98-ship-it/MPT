@@ -154,7 +154,6 @@ class StoreCrossAttnProcessor:
         residual = hidden_states
         is_cross = encoder_hidden_states is not None
 
-        # P1 FIX: handle 4-D spatial input (used in some UNet blocks)
         input_ndim = hidden_states.ndim
         if input_ndim == 4:
             batch_size, channel, height, width = hidden_states.shape
@@ -170,7 +169,7 @@ class StoreCrossAttnProcessor:
         key   = attn.to_k(encoder_hidden_states)
         value = attn.to_v(encoder_hidden_states)
 
-        # P0 FIX: use prepare_attention_mask BEFORE head_to_batch_dim
+        
         # to ensure the mask shape aligns with the original batch_size
         if attention_mask is not None:
             attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size_orig)
@@ -182,7 +181,7 @@ class StoreCrossAttnProcessor:
         # Capture TRUE attention probability map [BH, Q, K] for cross-attn only
         attention_probs = attn.get_attention_scores(query, key, attention_mask)
         if is_cross:
-            # P0 FIX: handle CFG where batch_size >= 2 (uncond + cond).
+            
             # We must only capture the CONDITIONAL attention map to avoid dilution.
             bh, q_len, k_len = attention_probs.shape
             num_heads = bh // batch_size_orig
@@ -202,11 +201,11 @@ class StoreCrossAttnProcessor:
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)
 
-        # P1 FIX: apply rescale_output_factor if present
+        
         if hasattr(attn, "rescale_output_factor") and attn.rescale_output_factor != 1.0:
             hidden_states = hidden_states / attn.rescale_output_factor
 
-        # P1 FIX: restore 4-D shape
+        
         if input_ndim == 4:
             hidden_states = hidden_states.transpose(-1, -2).reshape(batch_size, channel, height, width)
 
@@ -240,7 +239,7 @@ class PerConceptAttentionCache:
         self._saved_processors = {}
         for name, module in unet.attn_processors.items():
             self._saved_processors[name] = module  # save originals
-        # Install our processor on every cross-attn block (.attn2)
+        
         new_processors = {}
         for name in unet.attn_processors:
             if "attn2" in name:
@@ -340,7 +339,6 @@ class PerConceptAttentionCache:
     def compute_attn_overlap_matrix(self, n_concepts, prompt_token_indices=None):
         """
         Compute Σ^attn: pairwise inner product of attention maps between concepts.
-        P1 FIX: Overlap is computed using ONLY the concept tokens' spatial maps,
         preventing dilution by BOS/EOS/padding tokens.
         """
         import numpy as np
@@ -442,7 +440,6 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             feature_extractor=feature_extractor,
         )
         # Load CLIP once (shared across all __call__ invocations)
-        # P1 FIX: use _execution_device instead of hard-coded .cuda()
         _clip_dir = r"d:\projects\BlackScholesDiffusion2024-main\Model\CLIP"
         print("[MPT] Loading CLIP model (one-time)...")
         try:
@@ -477,7 +474,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             scores: list of floats, one per prompt
         """
         scores = []
-        # P1 FIX: dynamically follow UNet device at runtime (handles pipe.to(device) after __init__)
+        
         _unet_dev = next(self.unet.parameters()).device
         if _unet_dev != self._clip_device:
             self.clip_model = self.clip_model.to(_unet_dev)
@@ -487,11 +484,11 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             clip_inputs = clip_processor(
                 text=[p], images=image_np, return_tensors="pt", padding=True
             )
-            # P1 FIX: device-safe — send all tensors to the same device as CLIP
+    
             clip_inputs = {k: v.to(_dev) if hasattr(v, "to") else v
                           for k, v in clip_inputs.items()}
             clip_out = clip_model(**clip_inputs)
-            # FIX (P0): Do NOT take .abs() — negative logits mean the image does NOT
+
             # match the prompt. Preserving the sign is critical for correct urgency ranking.
             score = clip_out.logits_per_image.cpu().detach().numpy()
             scores.append(float(score[0, 0]) if score.ndim > 1 else float(score))
@@ -517,7 +514,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         la = config.get("lambda_attn_state", 0.3)
 
         # Fclip_i: calibrated CLIP score relative to per-prompt baseline κ_i
-        # P1 FIX: avoid per-step min-max which destroys the absolute deficiency meaning.
+
         # Use kappa_i from config if available, else sigmoid calibration.
         clip_arr = np.array(clip_scores, dtype=np.float64)
         kappa_ref = config.get("_kappa_i", None)
@@ -542,7 +539,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         fcover = np.ones(n)
         if attn_cache is not None:
             for j in range(n):
-                # P0 FIX: pass prompt_indices so coverage uses correct concept token positions
+                
                 pidx = prompt_token_indices[j] if (prompt_token_indices is not None and j < len(prompt_token_indices)) else None
                 fcover[j] = attn_cache.get_concept_coverage(j, pidx)
             if fcover.max() > fcover.min():
@@ -562,10 +559,6 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         """
         Compute Black-Scholes urgency prior u^BS via softmax normalization.
 
-        FIX (Bug 4): S_{t,i} = 100·CLIP  (×100 scale per PDF Page 4).
-                     K_i     = 100·κ_i   (per-prompt CLIP baseline).
-        kappa_i: np.ndarray of per-prompt baselines (captured at step 0).
-                 Falls back to 0.25 per concept if not provided.
         """
         n = len(clip_scores)
         if temperature is None:
@@ -1029,9 +1022,11 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             else:
                 noise_pred_guided = noise_pred
 
-            # Step scheduler to get prediction
-            sched_out = self.scheduler.step(noise_pred_guided, t, latents, **extra_step_kwargs)
-            pred_x0 = sched_out.pred_original_sample
+            # P0 FIX: Manually compute pred_x0 to avoid advancing the scheduler's internal step_index!
+            # Calling scheduler.step() twice per timestep breaks the sampling trajectory.
+            alpha_prod_t = self.scheduler.alphas_cumprod[int(t)].to(latents.device)
+            beta_prod_t = 1 - alpha_prod_t
+            pred_x0 = (latents - beta_prod_t ** (0.5) * noise_pred_guided) / alpha_prod_t ** (0.5)
 
             # Decode to image space for CLIP scoring
             latents_forecast = 1 / 0.18215 * pred_x0
@@ -1095,6 +1090,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             else:
                 noise_base_final = noise_base_raw
 
+            noise_j_tensors = {}  # Store guided noise for step 7 combination
             for j in range(n_concepts):
                 if do_classifier_free_guidance:
                     embed_j = cfg_embeddings[j]
@@ -1118,6 +1114,8 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
                     noise_j_final = nu_j + guidance_scale * (nj - nu_j)
                 else:
                     noise_j_final = noise_j
+                    
+                noise_j_tensors[j] = noise_j_final
 
                 # Store Δε_i = ε_i - ε_base (not raw ε_i) — PDF definition
                 delta_j = (noise_j_final - noise_base_final).cpu().numpy().flatten()
@@ -1150,27 +1148,13 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             )
 
             # ---- Step 7: Apply weighted condition injection ----
-            # Combine concept embeddings with optimal weights
-            cond_weighted = sum(
-                w_optimal[j] * concept_embeddings[j] for j in range(n_concepts)
-            )  # [1, 77, 768]
-
-            if do_classifier_free_guidance:
-                final_embed = torch.cat([uncond_single, cond_weighted], dim=0)
-            else:
-                final_embed = cond_weighted.unsqueeze(0)
-
-            # Final UNet forward pass with optimal weights
-            noise_pred_final = self.unet(
-                latent_model_input, t, encoder_hidden_states=final_embed
-            ).sample
-
-            # Apply guidance
-            if do_classifier_free_guidance:
-                noise_pred_uncond_f, noise_pred_text_f = noise_pred_final.chunk(2)
-                noise_pred_final = noise_pred_uncond_f + guidance_scale * (
-                    noise_pred_text_f - noise_pred_uncond_f
-                )
+            # P0 FIX: MPT linearly combines the GUIDED noise predictions, NOT the text embeddings!
+            # Combining text embeddings shrinks their L2 norm (due to quasi-orthogonality),
+            # causing the UNet to collapse to unconditional generation (e.g. random humans/landscapes).
+            # This also saves 1 full UNet forward pass per step!
+            noise_pred_final = sum(
+                w_optimal[j] * noise_j_tensors[j] for j in range(n_concepts)
+            )
 
             # Scheduler step
             latents = self.scheduler.step(noise_pred_final, t, latents, **extra_step_kwargs).prev_sample
