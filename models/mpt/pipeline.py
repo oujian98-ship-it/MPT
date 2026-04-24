@@ -132,6 +132,54 @@ DEFAULT_MPT_CONFIG = {
 # Attention Feature Extractor (for cross-attention extraction)
 # =====================================================================
 
+class StoreCrossAttnProcessor:
+    """
+    Custom AttentionProcessor that captures the true cross-attention
+    probability map (post-softmax) during a per-concept forward pass.
+
+    This replaces the fragile forward hook on .attn2 output, which
+    in diffusers captures hidden_states, NOT attention_probs.
+
+    PDF definition: Σ_attn(i,j) = <A_{t,i}, A_{t,j}>
+    where A_{t,i} is the NORMALIZED (softmax) cross-attention map.
+    """
+
+    def __init__(self, store: dict, concept_idx: int):
+        self.store = store        # reference to concept_data dict
+        self.concept_idx = concept_idx
+
+    def __call__(self, attn, hidden_states, encoder_hidden_states=None,
+                 attention_mask=None, **kwargs):
+        residual = hidden_states
+        is_cross = encoder_hidden_states is not None
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+
+        query = attn.to_q(hidden_states)
+        key   = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+
+        query = attn.head_to_batch_dim(query)
+        key   = attn.head_to_batch_dim(key)
+        value = attn.head_to_batch_dim(value)
+
+        # Capture TRUE attention probability map (post-softmax) for cross-attn only
+        attention_probs = attn.get_attention_scores(query, key, attention_mask)
+        if is_cross:
+            self.store.setdefault(self.concept_idx, {}).setdefault("attn_maps", []).append(
+                attention_probs.detach().float().cpu()
+            )
+
+        hidden_states = torch.bmm(attention_probs, value)
+        hidden_states = attn.batch_to_head_dim(hidden_states)
+        hidden_states = attn.to_out[0](hidden_states)
+        hidden_states = attn.to_out[1](hidden_states)
+
+        if getattr(attn, "residual_connection", False):
+            hidden_states = hidden_states + residual
+        return hidden_states
+
+
 class PerConceptAttentionCache:
     """
     Captures cross-attention outputs during per-concept UNet forward passes.
@@ -149,37 +197,30 @@ class PerConceptAttentionCache:
 
     def __init__(self):
         self.concept_data = {}
-        self._current_concept_idx = None
-        self._hook_handles = []
+        self._saved_processors = {}  # stores original processors for restore
 
     def start_capture(self, unet, concept_idx):
-        """Register temporary hooks before a per-concept forward pass."""
-        self._current_concept_idx = concept_idx
+        """Install StoreCrossAttnProcessor on all cross-attn layers before a per-concept forward pass."""
         self.concept_data[concept_idx] = {"attn_maps": [], "mid_features": []}
-        
-        def make_attn_hook(name):
-            def hook(module, input, output):
-                if self._current_concept_idx is None:
-                    return
-                if isinstance(output, torch.Tensor) and output.dim() == 4:
-                    feat = output.detach().cpu()
-                    self.concept_data[self._current_concept_idx]["attn_maps"].append(feat)
-            return hook
-        
-        for name, module in unet.named_modules():
-            if name.endswith(".attn2"):
-                try:
-                    h = module.register_forward_hook(make_attn_hook(name))
-                    self._hook_handles.append(h)
-                except Exception:
-                    pass
+        self._saved_processors = {}
+        for name, module in unet.attn_processors.items():
+            self._saved_processors[name] = module  # save originals
+        # Install our processor on every cross-attn block (.attn2)
+        new_processors = {}
+        for name in unet.attn_processors:
+            if "attn2" in name:
+                new_processors[name] = StoreCrossAttnProcessor(
+                    store=self.concept_data, concept_idx=concept_idx
+                )
+            else:
+                new_processors[name] = self._saved_processors[name]
+        unet.set_attn_processor(new_processors)
 
-    def stop_capture(self):
-        """Remove all hooks after the forward pass."""
-        self._current_concept_idx = None
-        for h in self._hook_handles:
-            h.remove()
-        self._hook_handles.clear()
+    def stop_capture(self, unet):
+        """Restore original processors after the per-concept forward pass."""
+        if self._saved_processors:
+            unet.set_attn_processor(self._saved_processors)
+            self._saved_processors = {}
 
     @staticmethod
     def compute_token_activation(attn_maps_list, prompt_indices=None):
@@ -319,12 +360,18 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             feature_extractor=feature_extractor,
         )
         # Load CLIP once (shared across all __call__ invocations)
+        # P1 FIX: use _execution_device instead of hard-coded .cuda()
         _clip_dir = r"d:\projects\BlackScholesDiffusion2024-main\Model\CLIP"
         print("[MPT] Loading CLIP model (one-time)...")
-        self.clip_model = CLIPModel.from_pretrained(_clip_dir).cuda()
+        try:
+            _clip_device = self._execution_device
+        except Exception:
+            _clip_device = next(iter(unet.parameters())).device
+        self.clip_model = CLIPModel.from_pretrained(_clip_dir).to(_clip_device)
         self.clip_processor = CLIPProcessor.from_pretrained(_clip_dir)
         self.clip_model.eval()
-        print("[MPT] CLIP loaded.")
+        self._clip_device = _clip_device
+        print(f"[MPT] CLIP loaded on {_clip_device}.")
 
     def enable_attention_slicing(self, slice_size: Optional[Union[str, int]] = "auto"):
         if slice_size == "auto":
@@ -348,13 +395,14 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             scores: list of floats, one per prompt
         """
         scores = []
+        _dev = self._clip_device
         for p in prompts_list:
             clip_inputs = clip_processor(
                 text=[p], images=image_np, return_tensors="pt", padding=True
             )
-            clip_inputs["pixel_values"] = clip_inputs["pixel_values"].cuda()
-            clip_inputs["input_ids"] = clip_inputs["input_ids"].cuda()
-            clip_inputs["attention_mask"] = clip_inputs["attention_mask"].cuda()
+            # P1 FIX: device-safe — send all tensors to the same device as CLIP
+            clip_inputs = {k: v.to(_dev) if hasattr(v, "to") else v
+                          for k, v in clip_inputs.items()}
             clip_out = clip_model(**clip_inputs)
             # FIX (P0): Do NOT take .abs() — negative logits mean the image does NOT
             # match the prompt. Preserving the sign is critical for correct urgency ranking.
@@ -381,12 +429,18 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         lt = config.get("lambda_token_state", 0.3)
         la = config.get("lambda_attn_state", 0.3)
 
-        # Fclip_i: normalized CLIP score
+        # Fclip_i: calibrated CLIP score relative to per-prompt baseline κ_i
+        # P1 FIX: avoid per-step min-max which destroys the absolute deficiency meaning.
+        # Use kappa_i from config if available, else sigmoid calibration.
         clip_arr = np.array(clip_scores, dtype=np.float64)
-        if clip_arr.max() > clip_arr.min():
-            fclip = (clip_arr - clip_arr.min()) / (clip_arr.max() - clip_arr.min() + 1e-8)
+        kappa_ref = config.get("_kappa_i", None)
+        if kappa_ref is not None and len(kappa_ref) == n:
+            kappa_arr = np.array(kappa_ref, dtype=np.float64)
+            fclip = clip_arr / (kappa_arr + 1e-8)
+            fclip = np.clip(fclip, 0.0, 1.5) / 1.5  # normalise to [0,1]
         else:
-            fclip = np.ones(n) / n
+            # Sigmoid calibration: logit centre ~25, scale 5 (CLIP logits typical range)
+            fclip = 1.0 / (1.0 + np.exp(-(clip_arr - 25.0) / 5.0))
 
         # Ftoken_i: token activation from per-concept attention cache
         ftoken = np.ones(n)
@@ -405,14 +459,10 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             if fcover.max() > fcover.min():
                 fcover = (fcover - fcover.min()) / (fcover.max() - fcover.min() + 1e-8)
 
-        # Composite state score
-        F = lc * fclip + lt * ftoken + la * fcover
-
-        # Re-normalize to [0, 1]
-        if F.max() > F.min():
-            F = (F - F.min()) / (F.max() - F.min() + 1e-8)
-        else:
-            F = np.ones(n) / n
+        # Composite state score — weighted sum, clip to [0,1] (no per-step min-max)
+        weight_sum = lc + lt + la + 1e-8
+        F = (lc * fclip + lt * ftoken + la * fcover) / weight_sum
+        F = np.clip(F, 0.0, 1.0)
 
         return F.tolist()
 
@@ -602,6 +652,11 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
                 Sigma += b3 * Sigma_inst
 
         Sigma += 1e-6 * np.eye(n)
+        # P2 FIX: project to PSD so w^T Sigma w is always non-negative (true risk penalty)
+        Sigma = 0.5 * (Sigma + Sigma.T)  # symmetrise
+        vals, vecs = np.linalg.eigh(Sigma)
+        vals = np.maximum(vals, 1e-6)    # clip negative eigenvalues
+        Sigma = (vecs * vals) @ vecs.T
         return Sigma
 
 
@@ -624,15 +679,19 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
         n = len(w)
         eps = 1e-10
 
-        # --- R_bal: Var of weighted satisfaction w_i·q_i (FIX P0: must depend on w) ---
-        # If q_arr is independent of w, its gradient w.r.t. w is zero and the
-        # balance penalty has NO effect on the optimizer. Using w*q makes it
-        # differentiable in w so the finite-difference gradient is non-zero.
+        # --- R_bal: Var(q(w)) surrogate — PDF form, but with w-dependent surrogate ---
+        # PDF defines q_t,i(w_t) = F_i(x_hat_{t-1}(w_t)), which is expensive to compute.
+        # Surrogate: q_i(w) = state_scores_i + w_i * lookahead_proxy_i
+        # This preserves the Var(q(w)) form and makes R_bal differentiable in w.
         if predicted_scores is not None and len(predicted_scores) == n:
-            q_arr = np.array(predicted_scores, dtype=np.float64)
+            q_base = np.array(predicted_scores, dtype=np.float64)
         else:
-            q_arr = np.array(state_scores, dtype=np.float64)
-        R_bal = float(np.var(w * q_arr))  # Var(w_i·q_i) — depends on w ✓
+            q_base = np.array(state_scores, dtype=np.float64)
+        # Approximate lookahead contribution per concept using w (proxy for marginal gain)
+        w_arr = np.array(w, dtype=np.float64)
+        deficiency = np.clip(1.0 - q_base, 0.0, 1.0)
+        q_surrogate = np.clip(q_base + w_arr * deficiency, 0.0, 1.0)
+        R_bal = float(np.var(q_surrogate))  # Var(q(w)) — depends on w via q_surrogate
 
         # --- Entropy: H(w) = -Σ w·log(w) ---
         w_safe = np.clip(w, eps, None)
@@ -906,6 +965,9 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
                 kappa_i = np.array(clip_scores, dtype=np.float64)
                 kappa_i = np.clip(kappa_i, 1e-4, None)
 
+            # P1 FIX: inject kappa_i into cfg so _compute_state_scores uses baseline calibration
+            cfg["_kappa_i"] = kappa_i.tolist() if kappa_i is not None else None
+
             # ---- Step 2: Compute BS urgency prior ----
             bs_urgency = self._compute_bs_urgency_prior(
                 clip_scores, sigma_for_bs, time_remaining, num_inference_steps,
@@ -924,33 +986,50 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             )
 
             # ---- Step 4: Collect per-concept noise updates + attention maps ----
+            # P1 FIX: Σ_upd should use Δε_i = ε_i - ε_base (not raw ε_i)
+            # First compute the base noise prediction with equal-weight embedding.
             noise_updates = {}
             attn_cache.clear()  # clear previous step data
+
+            # Compute base noise (equal-weight composite) for delta subtraction
+            if do_classifier_free_guidance:
+                base_embed = torch.cat([uncond_single,
+                    sum((1.0/n_concepts)*concept_embeddings[j] for j in range(n_concepts))], dim=0)
+            else:
+                base_embed = sum((1.0/n_concepts)*concept_embeddings[j] for j in range(n_concepts))
+            noise_base_raw = self.unet(latent_model_input, t, encoder_hidden_states=base_embed).sample
+            if do_classifier_free_guidance:
+                nu_base, n_base = noise_base_raw.chunk(2)
+                noise_base_final = nu_base + guidance_scale * (n_base - nu_base)
+            else:
+                noise_base_final = noise_base_raw
 
             for j in range(n_concepts):
                 if do_classifier_free_guidance:
                     embed_j = cfg_embeddings[j]
                 else:
                     embed_j = concept_embeddings[j].unsqueeze(0)
-                
-                # Capture cross-attention during this forward pass
+
+                # Capture true cross-attention probability maps via AttentionProcessor
                 if enable_attn:
                     attn_cache.start_capture(self.unet, j)
-                
+
                 noise_j = self.unet(
                     latent_model_input, t, encoder_hidden_states=embed_j
                 ).sample
-                
+
                 if enable_attn:
-                    attn_cache.stop_capture()
-                
+                    attn_cache.stop_capture(self.unet)  # restore original processors
+
                 if do_classifier_free_guidance:
                     nu_j, nj = noise_j.chunk(2)
                     noise_j_final = nu_j + guidance_scale * (nj - nu_j)
                 else:
                     noise_j_final = noise_j
-                
-                noise_updates[j] = noise_j_final.cpu().numpy().flatten()
+
+                # Store Δε_i = ε_i - ε_base (not raw ε_i) — PDF definition
+                delta_j = (noise_j_final - noise_base_final).cpu().numpy().flatten()
+                noise_updates[j] = delta_j
             # ---- Step 5: Compute risk covariance Σ ----
             Sigma = self._compute_risk_covariance(
                 attn_cache if enable_attn else None,

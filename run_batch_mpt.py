@@ -72,7 +72,8 @@ pipe = DiffusionPipeline.from_pretrained(
     ),
 ).to(device)
 
-generator = torch.Generator(device.type).manual_seed(0)
+# P0 FIX: generator is now created per-image inside the loop (see below)
+# to guarantee per-image reproducible seeds for fair comparison with BS / baseline.
 
 
 def is_prompt_complete(set_name, file_name, num_images=5):
@@ -131,11 +132,16 @@ for SET_NAME in ALL_SETS:
         print(f"    Concepts: {concept_list[1:4]}")
 
         for img_idx in range(1, 6):
+            # P0 FIX: per-image reproducible seed — prompt_idx * 1000 + img_idx
+            # ensures results are deterministic and comparable across methods.
+            seed = i * 1000 + img_idx
+            generator = torch.Generator(device.type).manual_seed(seed)
             res = pipe(
                 guidance_scale=7.5,
                 num_inference_steps=100,
                 eval_prompt=eval_prompt,
                 mpt_config=MPT_CONFIG,
+                generator=generator,
             )
             image = res.images[0]
             image.save(savedir + f"/result{img_idx}.png")
