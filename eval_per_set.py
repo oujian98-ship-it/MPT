@@ -1,16 +1,19 @@
 """
-eval_per_set.py  (Paper-style Edition)
+eval_per_set.py  (Dual-Track Evaluation Edition)
 ----------------------------------------------------
-For each set in {set1, set2, set3, set4}:
-  1. CLIP-combined (↑): CLIP(图像, 所有prompt组合成一个总prompt) — 整体语义对齐
-  2. CLIP-add      (↑): 平均 CLIP(图像, 每个单独概念prompt)    — 各概念是否都保住
-  3. BLIP⊙DINO     (↑): 对有vanilla参考的concept算(BLIP x DINO)再平均
-  4. KID           (↓): KernelInceptionDistance(vanilla, method)— 图像分布距离
+For each set in {set1, set2, set3, set4}, we compute two sets of metrics:
+
+[Official Compat Metrics] (To align with original Black-Scholes repo)
+  - BLIP⊙DINO (Official): Uses compositional prompts (p0, p1), double-softmax BLIP, separate DINO processing.
+
+[Corrected Metrics] (More rigorous for new methods)
+  - CLIP-combined: CLIP(图像, 所有prompt组合成一个总prompt)
+  - CLIP-add: 平均 CLIP(图像, 每个单独概念prompt)
+  - BLIP-atomic: Uses atomic prompts (p2, p3), single-softmax.
+  - Set-Level KID: KernelInceptionDistance computed globally over all images in the set.
 
 Final result = average of per-set means.
-Results printed as Table 1 and appended to logs/timestamp.txt in UTF-16LE.
-
-Time / GPU hours / Memory: 运行时自动测量（非硬编码）
+Results printed as a table and appended to logs/timestamp.txt in UTF-16LE.
 """
 
 import os, sys, glob, json, datetime, time
@@ -50,9 +53,6 @@ CLIP_PATH = r"d:\projects\BlackScholesDiffusion2024-main\Model\CLIP"
 LOG_DIR  = "logs"
 LOG_FILE  = os.path.join(LOG_DIR, f"eval_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
 
-# DINO对比只对有vanilla参考图的concept做（vanilla只有text3/text4对应p_list[2:4]）
-DINO_CONCEPT_INDICES = [2, 3]  # 概念A 和 概念B
-
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 def load_prompts(set_name):
@@ -77,10 +77,10 @@ def get_vanilla_imgs(pid, set_name):
     t3 = glob.glob(os.path.join(base, "text3", "*.png"))
     t4 = glob.glob(os.path.join(base, "text4", "*.png"))
     if t3 and t4:
-        return t3 + t4
+        return {"t3": t3, "t4": t4, "all": t3 + t4}
     t1 = glob.glob(os.path.join(base, "text1", "*.png"))
     t2 = glob.glob(os.path.join(base, "text2", "*.png"))
-    return t1 + t2
+    return {"t3": t1, "t4": t2, "all": t1 + t2}
 
 
 def get_method_imgs(pid, set_name, method):
@@ -116,6 +116,37 @@ from torchmetrics.image.kid import KernelInceptionDistance
 
 print("All models loaded.\n")
 
+# ── Metric Helpers ────────────────────────────────────────────────────────
+
+def extract_dino_features(img_paths):
+    feats = []
+    for path in img_paths:
+        img = Image.open(path).convert("RGB")
+        inp = dino_proc(img, return_tensors="pt").to(DEVICE)
+        with torch.no_grad():
+            out = dino_model(**inp)
+        feats.append(out.last_hidden_state.squeeze(0).view(-1))
+    if not feats:
+        return None
+    return torch.stack(feats, dim=0).mean(dim=0)
+
+def blip_score_official(img, text):
+    # Official Double-Softmax
+    inp = blip_proc(images=img, text=text, return_tensors="pt").to(DEVICE, torch.float16)
+    with torch.no_grad():
+        out = blip_model(**inp, use_image_text_matching_head=True)
+    probs1 = F.softmax(out.logits_per_image, dim=1)
+    probs2 = F.softmax(probs1, dim=1)
+    return probs2[0, 1].item()
+
+def blip_score_atomic(img, text):
+    # Standard Single-Softmax
+    inp = blip_proc(images=img, text=text, return_tensors="pt").to(DEVICE, torch.float16)
+    with torch.no_grad():
+        out = blip_model(**inp, use_image_text_matching_head=True)
+    probs = F.softmax(out.logits_per_image, dim=1)
+    return probs[0, 1].item()
+
 # ── Per-set evaluation ────────────────────────────────────────────────────
 
 set_results = {}
@@ -130,9 +161,11 @@ for set_name in SETS:
     print(f"Evaluating {set_name} ({len(prompts)} prompts)...")
     print(f"{'='*60}")
 
-    acc = {m: {"clip_comp": [], "clip_add": [], "kid": [],
-               "db_S6": []} for m in METHODS}
-
+    acc = {m: {"clip_comp": [], "clip_add": [], "blip_dino_official": [], "blip_atomic": []} for m in METHODS}
+    
+    # Set-level KID objects: subset_size 50 ensures stable kernel calculation over the entire set
+    set_kid_objs = {m: KernelInceptionDistance(subset_size=50).to(DEVICE) for m in METHODS}
+    
     # 重置每set的计时
     set_method_time = {m: 0.0 for m in METHODS}
     set_method_mem  = {m: 0.0 for m in METHODS}
@@ -140,22 +173,18 @@ for set_name in SETS:
     for item in tqdm(prompts, desc=set_name):
         pid    = item["file_name"]
         p_list = item["list"]
-
-        vanilla_imgs = get_vanilla_imgs(pid, set_name)
-        if not vanilla_imgs:
+        if len(p_list) < 4:
             continue
 
-        # --- Build vanilla KID pool + pre-extract DINO features (for text3/text4) ---
-        v_kid_imgs = []
-        v_dino_features = []  # per-image [197, 768]
-        for v_path in vanilla_imgs:
-            img = Image.open(v_path).convert("RGB")
-            v_kid_imgs.append(
-                torch.from_numpy(np.asarray(img)).unsqueeze(0).permute(0, 3,1,2))
-            inp = dino_proc(img, return_tensors="pt").to(DEVICE)
-            with torch.no_grad():
-                out = dino_model(**inp)
-            v_dino_features.append(out.last_hidden_state.squeeze(0))
+        vanilla_dict = get_vanilla_imgs(pid, set_name)
+        if not vanilla_dict["all"]:
+            continue
+
+        # Extract DINO features separately for t3 and t4
+        v_feat_t3 = extract_dino_features(vanilla_dict["t3"])
+        v_feat_t4 = extract_dino_features(vanilla_dict["t4"])
+        if v_feat_t3 is None or v_feat_t4 is None:
+            continue
 
         for m in METHODS:
             imgs = get_method_imgs(pid, set_name, m)
@@ -167,94 +196,62 @@ for set_name in SETS:
             t_start = time.perf_counter()
 
             clip_comp_scores, clip_add_scores = [], []
-            m_kid_imgs = []
+            blip_official_scores, blip_atomic_scores = [], []
 
             # ── Combined prompt text (for CLIP-combined) ──
             all_prompts_combined = " ".join(p_list)
+            
+            # --- DINO separate aggregation ---
+            m_feat_avg = extract_dino_features(imgs)
+            dino_sim_3 = F.cosine_similarity(v_feat_t3.unsqueeze(0), m_feat_avg.unsqueeze(0), dim=1).item()
+            dino_sim_4 = F.cosine_similarity(v_feat_t4.unsqueeze(0), m_feat_avg.unsqueeze(0), dim=1).item()
+            dino_avg = 0.5 * (dino_sim_3 + dino_sim_4)
 
             for img_p in imgs:
                 img = Image.open(img_p).convert("RGB")
 
-                # ═══ 1) CLIP-combined (↑): 图像 vs 所有prompt组合成总prompt ═══
-                inp_c = clip_proc(
-                    text=[all_prompts_combined], images=img,
-                    return_tensors="pt", padding=True).to(DEVICE)
+                # ═══ 1) CLIP-combined (↑) ═══
+                inp_c = clip_proc(text=[all_prompts_combined], images=img, return_tensors="pt", padding=True).to(DEVICE)
                 out_c = clip_model(**inp_c)
-                clip_comp_scores.append(
-                    out_c.logits_per_image.cpu().detach().numpy()[0][0] * 0.01)
+                clip_comp_scores.append(out_c.logits_per_image.cpu().detach().numpy()[0][0] * 0.01)
 
-                # ═══ 2) CLIP-add (↑): 对每个单独concept prompt分别算CLIP再平均 ═══
+                # ═══ 2) CLIP-add (↑) ═══
                 individual_scores = []
                 for pi in p_list:
-                    inp_i = clip_proc(
-                        text=[pi], images=img,
-                        return_tensors="pt", padding=True).to(DEVICE)
+                    inp_i = clip_proc(text=[pi], images=img, return_tensors="pt", padding=True).to(DEVICE)
                     out_i = clip_model(**inp_i)
                     individual_scores.append(out_i.logits_per_image.cpu().detach().numpy()[0][0])
                 clip_add_scores.append(float(np.mean(individual_scores)) * 0.01)
 
-                # ═══ KID tensor ═══
-                m_kid_imgs.append(
-                    torch.from_numpy(np.asarray(img)).unsqueeze(0).permute(0, 3,1,2))
+                # ═══ 3) BLIP Official (↑) (Compositional p0, p1 with double-softmax) ═══
+                b_off_0 = blip_score_official(img, p_list[0])
+                b_off_1 = blip_score_official(img, p_list[1])
+                blip_official_scores.append(0.5 * (b_off_0 + b_off_1))
+                
+                # ═══ 4) BLIP Atomic (↑) (Atomic p2, p3 with single-softmax) ═══
+                b_at_2 = blip_score_atomic(img, p_list[2])
+                b_at_3 = blip_score_atomic(img, p_list[3])
+                blip_atomic_scores.append(0.5 * (b_at_2 + b_at_3))
 
-            # ═══ 3) BLIP⊙DINO (↑): 对有vanilla参考的concept算(BLIP x DINO)再平均 ═══
-            blip_dino_per_concept = []
-            for ci in DINO_CONCEPT_INDICES:
-                if ci >= len(p_list):
-                    break
-                concept_prompt = p_list[ci]
-
-                # DINO: vanilla(text3+text4) vs method 该concept的视觉特征余弦相似度
-                v_feat_avg = torch.stack(v_dino_features, dim=0).mean(dim=0).view(-1)
-
-                m_dino_features = []
-                for img_p in imgs:
-                    m_img = Image.open(img_p).convert("RGB")
-                    m_inp = dino_proc(m_img, return_tensors="pt").to(DEVICE)
-                    with torch.no_grad():
-                        m_out = dino_model(**m_inp)
-                    m_dino_features.append(m_out.last_hidden_state.squeeze(0))
-                m_feat_avg = torch.stack(m_dino_features, dim=0).mean(dim=0).view(-1)
-                dino_sim = F.cosine_similarity(v_feat_avg.unsqueeze(0), m_feat_avg.unsqueeze(0), dim=1).item()
-
-                # BLIP: 图像 vs 该concept prompt的图文匹配概率
-                blip_for_concept = []
-                for img_p in imgs:
-                    b_img = Image.open(img_p).convert("RGB")
-                    b_inp = blip_proc(images=b_img, text=concept_prompt,
-                                     return_tensors="pt").to(DEVICE, torch.float16)
-                    with torch.no_grad():
-                        b_out = blip_model(**b_inp, use_image_text_matching_head=True)
-                    b_score = F.softmax(b_out.logits_per_image, dim=1)[0][1].item()
-                    blip_for_concept.append(b_score)
-                blip_avg = float(np.mean(blip_for_concept))
-
-                blip_dino_per_concept.append(blip_avg * dino_sim)
-
-            if blip_dino_per_concept:
-                acc[m]["db_S6"].append(float(np.mean(blip_dino_per_concept)))
-            else:
-                acc[m]["db_S6"].append(0.0)
+                # ═══ 5) Update Set-Level KID ═══
+                m_tensor = torch.from_numpy(np.asarray(img)).unsqueeze(0).permute(0, 3,1,2).to(DEVICE)
+                set_kid_objs[m].update(m_tensor, real=False)
+                
+            # Add all vanilla images for this prompt to the set's real distribution
+            for v_path in vanilla_dict["all"]:
+                v_img = Image.open(v_path).convert("RGB")
+                v_tensor = torch.from_numpy(np.asarray(v_img)).unsqueeze(0).permute(0, 3,1,2).to(DEVICE)
+                set_kid_objs[m].update(v_tensor, real=True)
 
             acc[m]["clip_comp"].append(float(np.mean(clip_comp_scores)))
             acc[m]["clip_add"].append(float(np.mean(clip_add_scores)))
-
-            # ═══ 4) KID (↓) ═══
-            # ✅ Fix: 原代码 ss=min(5,...) 把 subset_size 硬限制到5，对每prompt只有5张图时
-            # KID 统计方差极大、结果不可靠。改为使用全部可用样本量（min(n_real, n_fake)），
-            # 只保留 >= 2 的合法性下界检查。
-            n_real = len(v_kid_imgs)
-            n_fake = len(m_kid_imgs)
-            ss = min(n_real, n_fake)
-            if ss >= 2:
-                kid = KernelInceptionDistance(subset_size=ss).to(DEVICE)
-                for vi in v_kid_imgs: kid.update(vi.to(DEVICE), real=True)
-                for mi in m_kid_imgs: kid.update(mi.to(DEVICE), real=False)
-                k_val, _ = kid.compute()
-                acc[m]["kid"].append(k_val.detach().cpu().item())
-                del kid
-            else:
-                acc[m]["kid"].append(0.0)
+            
+            # BLIP x DINO (Official)
+            blip_official_avg = float(np.mean(blip_official_scores))
+            acc[m]["blip_dino_official"].append(blip_official_avg * dino_avg)
+            
+            # BLIP Atomic (Corrected)
+            acc[m]["blip_atomic"].append(float(np.mean(blip_atomic_scores)))
 
             # ═══ 计时结束 & 记录 ═══
             t_elapsed = time.perf_counter() - t_start
@@ -265,8 +262,18 @@ for set_name in SETS:
 
             torch.cuda.empty_cache()
 
-        del v_kid_imgs
-        del v_dino_features
+    # Compute Set-Level KID
+    set_kid_scores = {}
+    for m in METHODS:
+        try:
+            k_val, _ = set_kid_objs[m].compute()
+            set_kid_scores[m] = k_val.detach().cpu().item()
+        except Exception as e:
+            print(f"[WARN] Failed to compute Set-Level KID for {m} in {set_name}: {e}")
+            set_kid_scores[m] = 0.0
+        
+        # Cleanup memory
+        del set_kid_objs[m]
         torch.cuda.empty_cache()
 
     # 累积到全局 perf（跨set累加耗时和取最大显存）
@@ -280,98 +287,57 @@ for set_name in SETS:
     set_means = {}
     for m in METHODS:
         entry = {
-            "clip_comp":  float(np.mean(acc[m]["clip_comp"]))  if acc[m]["clip_comp"]  else 0.0,
-            "clip_add":   float(np.mean(acc[m]["clip_add"]))   if acc[m]["clip_add"]   else 0.0,
-            "kid":        float(np.mean(acc[m]["kid"]))        if acc[m]["kid"]        else 0.0,
-            "db_S6":      float(np.mean(acc[m]["db_S6"]))      if acc[m]["db_S6"]      else 0.0,
-            "dino_blip":  float(np.mean(acc[m]["db_S6"]))      if acc[m]["db_S6"]      else 0.0,
+            "clip_comp":          float(np.mean(acc[m]["clip_comp"]))          if acc[m]["clip_comp"] else 0.0,
+            "clip_add":           float(np.mean(acc[m]["clip_add"]))           if acc[m]["clip_add"]  else 0.0,
+            "blip_dino_official": float(np.mean(acc[m]["blip_dino_official"])) if acc[m]["blip_dino_official"] else 0.0,
+            "blip_atomic":        float(np.mean(acc[m]["blip_atomic"]))        if acc[m]["blip_atomic"] else 0.0,
+            "kid_set":            set_kid_scores[m]
         }
         set_means[m] = entry
     set_results[set_name] = set_means
 
     print(f"\n--- {set_name} per-set results ---")
-    print(f"{'Method':<22} {'CLIP-comp':>10} {'CLIP-add':>10} {'BLIP⊙DINO':>12} {'KID':>10}")
-    print("-" * 68)
+    print(f"{'Method':<22} {'BLIPxDINO(Off)':>16} {'BLIP-Atomic':>14} {'Set-KID':>10}")
+    print("-" * 66)
     for m in METHODS:
         r = set_means[m]
-        print(f"{METHOD_DISPLAY[m]:<22} {r['clip_comp']:>10.4f} {r['clip_add']:>10.4f} {r['db_S6']:>12.4f} {r['kid']:>10.5f}")
+        print(f"{METHOD_DISPLAY[m]:<22} {r['blip_dino_official']:>16.4f} {r['blip_atomic']:>14.4f} {r['kid_set']:>10.5f}")
 
     json_path = f"results_{set_name}_full.json"
     with open(json_path, "w") as f:
         json.dump(set_means, f, indent=4)
-    print(f"Saved {json_path}")
 
 
 # ── Final average across sets ─────────────────────────────────────────────
 
-print("\n" + "="*60)
+print("\n" + "="*80)
 print("FINAL TABLE: Average across all sets")
-print("="*60)
+print("="*80)
 
 final = {}
 for m in METHODS:
-    keys = ["clip_comp", "clip_add", "kid", "db_S6"]
+    keys = ["clip_comp", "clip_add", "blip_dino_official", "blip_atomic", "kid_set"]
     vals = {k: [] for k in keys}
     for sn in SETS:
         if sn in set_results and set_results[sn][m]["clip_comp"] > 0:
             for k in keys:
                 vals[k].append(set_results[sn][m][k])
     final[m] = {k: float(np.mean(v)) if v else 0.0 for k, v in vals.items()}
-    final[m]["dino_blip"] = final[m]["db_S6"]
-
-lines = []
-lines.append("\n=== Per-set CLIP-combined scores ===")
-lines.append(f"{'Method':<22} " + " ".join(f"{s:>8}" for s in SETS) + f" {'AVG':>8}")
-for m in METHODS:
-    row = f"{METHOD_DISPLAY[m]:<22}"
-    vals = []
-    for sn in SETS:
-        v = set_results.get(sn, {}).get(m, {}).get("clip_comp", 0.0)
-        row += f" {v:>8.4f}"
-        vals.append(v)
-    row += f" {np.mean(vals):>8.4f}"
-    lines.append(row)
-
-lines.append("\n=== Per-set BLIP⊙DINO scores ===")
-lines.append(f"{'Method':<22} " + " ".join(f"{sn:>8}" for sn in SETS) + f" {'AVG':>8}")
-for m in METHODS:
-    row = f"{METHOD_DISPLAY[m]:<22}"
-    vals = []
-    for sn in SETS:
-        v = set_results.get(sn, {}).get(m, {}).get("db_S6", 0.0)
-        row += f" {v:>8.4f}"
-        vals.append(v)
-    row += f" {np.mean(vals):>8.4f}"
-    lines.append(row)
-
-lines.append("\n=== Per-set KID scores ===")
-lines.append(f"{'Method':<22} " + " ".join(f"{s:>8}" for s in SETS) + f" {'AVG':>8}")
-for m in METHODS:
-    row = f"{METHOD_DISPLAY[m]:<22}"
-    vals = []
-    for sn in SETS:
-        v = set_results.get(sn, {}).get(m, {}).get("kid", 0.0)
-        row += f" {v:>8.5f}"
-        vals.append(v)
-    row += f" {np.mean(vals):>8.5f}"
-    lines.append(row)
-
-breakdown_str = "\n".join(lines)
-print(breakdown_str)
 
 header = (
-    "Method | CLIP-combined (up) | CLIP-add (up) | BLIP x DINO (up) "
-    "| KID (down) | Time(s) | GPU hrs | Mem(GB)"
+    f"{'Method':<22} | {'CLIP-comp':>9} | {'CLIP-add':>9} | "
+    f"{'BD(Off)':>9} | {'BLIP-At':>9} | {'Set-KID':>9} | "
+    f"{'Time(s)':>7} | {'Mem(GB)':>7}"
 )
-sep = "--- | --- | --- | --- | --- | --- | --- | --- | ---"
+sep = "-" * len(header)
 rows = [header, sep]
 for m in METHODS:
     p = method_perf[m]
     r = final[m]
     rows.append(
-        f"{METHOD_DISPLAY[m]} | {r['clip_comp']:.4f} | {r['clip_add']:.4f} "
-        f"| {r['db_S6']:.4f} | {r['kid']:.5f} "
-        f"| {p['time_s']:.1f} | {p['gpu_hrs']:.4f} | {p['mem_gb']:.1f}"
+        f"{METHOD_DISPLAY[m]:<22} | {r['clip_comp']:>9.4f} | {r['clip_add']:>9.4f} | "
+        f"{r['blip_dino_official']:>9.4f} | {r['blip_atomic']:>9.4f} | {r['kid_set']:>9.5f} | "
+        f"{p['time_s']:>7.1f} | {p['mem_gb']:>7.1f}"
     )
 table_str = "\n".join(rows)
 
@@ -379,20 +345,16 @@ print("\n" + table_str)
 
 
 ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-eq = "=" * 70
 block = (
-    f"\n\n{eq}\n"
-    f"[Evaluation Run] {ts}\n"
-    f"Metrics: CLIP-combined / CLIP-add / BLIP⊙DINO / KID\n"
-    f"DINO concepts: indices {DINO_CONCEPT_INDICES} (vanilla text3/text4)\n"
-    f"Time/GPU/Mem: measured at runtime (not hardcoded)\n"
-    f"\n{breakdown_str}\n"
+    f"\n\n{'='*80}\n"
+    f"[Evaluation Run (Dual-Track)] {ts}\n"
+    f"Official Metrics: BLIPxDINO(Off) uses double-softmax & separate DINO references.\n"
+    f"Corrected Metrics: BLIP-At uses single-softmax atomic prompts. Set-KID computed globally per set.\n"
     f"\n{table_str}\n"
 )
 
 os.makedirs(LOG_DIR, exist_ok=True)
-
-with open(LOG_FILE, "w", encoding="utf-16-le") as f:
+with open(LOG_FILE, "a", encoding="utf-16-le") as f:
     f.write(block)
 
 print(f"\n[OK] Saved to {LOG_FILE}")
