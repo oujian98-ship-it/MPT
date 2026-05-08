@@ -93,3 +93,4 @@ config_local.py
 portfolio_pdf_text.txt
 pdf_text.txt
 
+*.json

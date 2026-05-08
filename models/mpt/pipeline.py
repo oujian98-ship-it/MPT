@@ -103,8 +103,8 @@ DEFAULT_MPT_CONFIG = {
     "alpha_history": 0.2,      # α₃: 历史 EMA 增益
     "alpha_bs": 0.2,           # α₄: BS 紧迫性先验
     # --- Risk coefficients ---
-    "beta_attn": 1.0,          # β₁: 注意力重叠风险
-    "beta_upd": 1.0,           # β₂: 更新冲突风险
+    "beta_attn": 0.8,          # β₁: 注意力重叠风险
+    "beta_upd": 0.8,           # β₂: 更新冲突风险
     "beta_inst": 0.5,          # β₃: 不稳定性风险
     # --- Regularization ---
     "lambda_r": 0.5,           # λ_r: 风险厌恶系数（整体风险惩罚缩放）

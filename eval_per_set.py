@@ -112,7 +112,42 @@ from transformers import AutoImageProcessor, Dinov2Model
 dino_proc     = AutoImageProcessor.from_pretrained(DINO_PATH)
 dino_model    = Dinov2Model.from_pretrained(DINO_PATH).to(DEVICE)
 
-from torchmetrics.image.kid import KernelInceptionDistance
+from torchvision.models import inception_v3, Inception_V3_Weights
+import torchvision.transforms as transforms
+
+print("Loading Inception-v3 for standard KID...")
+inception_model = inception_v3(weights=Inception_V3_Weights.IMAGENET1K_V1, transform_input=False).to(DEVICE)
+inception_model.eval()
+inception_model.fc = torch.nn.Identity()
+
+inception_transform = transforms.Compose([
+    transforms.Resize((299, 299)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+def polynomial_kernel(X, Y):
+    return (X @ Y.T / X.shape[1] + 1.0) ** 3
+
+def compute_kid_mmd(feat_real, feat_fake):
+    if feat_real.shape[0] < 2 or feat_fake.shape[0] < 2:
+        return 0.0
+    K_XX = polynomial_kernel(feat_real, feat_real)
+    K_YY = polynomial_kernel(feat_fake, feat_fake)
+    K_XY = polynomial_kernel(feat_real, feat_fake)
+
+    m = K_XX.shape[0]
+    n = K_YY.shape[0]
+
+    diag_X = torch.diag(K_XX)
+    sum_K_XX = (K_XX.sum() - diag_X.sum()) / (m * (m - 1))
+
+    diag_Y = torch.diag(K_YY)
+    sum_K_YY = (K_YY.sum() - diag_Y.sum()) / (n * (n - 1))
+
+    sum_K_XY = K_XY.sum() / (m * n)
+
+    return (sum_K_XX + sum_K_YY - 2 * sum_K_XY).item()
 
 print("All models loaded.\n")
 
@@ -163,8 +198,9 @@ for set_name in SETS:
 
     acc = {m: {"clip_comp": [], "clip_add": [], "blip_dino_official": [], "blip_atomic": []} for m in METHODS}
     
-    # Set-level KID objects: subset_size 50 ensures stable kernel calculation over the entire set
-    set_kid_objs = {m: KernelInceptionDistance(subset_size=50).to(DEVICE) for m in METHODS}
+    # Set-level KID features
+    set_real_feats = {m: [] for m in METHODS}
+    set_fake_feats = {m: [] for m in METHODS}
     
     # 重置每set的计时
     set_method_time = {m: 0.0 for m in METHODS}
@@ -234,14 +270,18 @@ for set_name in SETS:
                 blip_atomic_scores.append(0.5 * (b_at_2 + b_at_3))
 
                 # ═══ 5) Update Set-Level KID ═══
-                m_tensor = torch.from_numpy(np.asarray(img)).unsqueeze(0).permute(0, 3,1,2).to(DEVICE)
-                set_kid_objs[m].update(m_tensor, real=False)
+                inc_inp = inception_transform(img).unsqueeze(0).to(DEVICE)
+                with torch.no_grad():
+                    inc_feat = inception_model(inc_inp)
+                set_fake_feats[m].append(inc_feat.cpu())
                 
             # Add all vanilla images for this prompt to the set's real distribution
             for v_path in vanilla_dict["all"]:
                 v_img = Image.open(v_path).convert("RGB")
-                v_tensor = torch.from_numpy(np.asarray(v_img)).unsqueeze(0).permute(0, 3,1,2).to(DEVICE)
-                set_kid_objs[m].update(v_tensor, real=True)
+                inc_inp = inception_transform(v_img).unsqueeze(0).to(DEVICE)
+                with torch.no_grad():
+                    inc_feat = inception_model(inc_inp)
+                set_real_feats[m].append(inc_feat.cpu())
 
             acc[m]["clip_comp"].append(float(np.mean(clip_comp_scores)))
             acc[m]["clip_add"].append(float(np.mean(clip_add_scores)))
@@ -266,14 +306,19 @@ for set_name in SETS:
     set_kid_scores = {}
     for m in METHODS:
         try:
-            k_val, _ = set_kid_objs[m].compute()
-            set_kid_scores[m] = k_val.detach().cpu().item()
+            if set_real_feats[m] and set_fake_feats[m]:
+                f_real = torch.cat(set_real_feats[m], dim=0).to(DEVICE)
+                f_fake = torch.cat(set_fake_feats[m], dim=0).to(DEVICE)
+                set_kid_scores[m] = compute_kid_mmd(f_real, f_fake)
+            else:
+                set_kid_scores[m] = 0.0
         except Exception as e:
             print(f"[WARN] Failed to compute Set-Level KID for {m} in {set_name}: {e}")
             set_kid_scores[m] = 0.0
         
         # Cleanup memory
-        del set_kid_objs[m]
+        set_real_feats[m].clear()
+        set_fake_feats[m].clear()
         torch.cuda.empty_cache()
 
     # 累积到全局 perf（跨set累加耗时和取最大显存）
