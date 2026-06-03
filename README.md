@@ -5,12 +5,29 @@ Black-Scholes prompt switching 方法、多个对比方法，以及本文的 MPT
 
 ## 环境依赖
 
-推荐环境：
+推荐系统环境：
 
 - Python 3.9+
-- PyTorch
+必需 Python 包：
 
-安装依赖：
+- `torch`
+- `torchvision`
+- `diffusers`
+- `transformers`
+- `accelerate`
+- `safetensors`
+- `huggingface_hub`
+- `numpy`
+- `scipy`
+- `opencv-python`
+- `Pillow`
+- `tqdm`
+- `requests`
+- `packaging`
+- `torchmetrics`
+- `torch-fidelity`
+
+安装命令：
 
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
@@ -18,6 +35,7 @@ pip install diffusers transformers accelerate safetensors huggingface_hub
 pip install numpy scipy opencv-python pillow tqdm requests packaging
 pip install torchmetrics torch-fidelity
 ```
+
 
 
 ## 模型下载
