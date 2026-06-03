@@ -17,6 +17,7 @@ BLIP_LOCAL_PATH = r"d:\projects\BlackScholesDiffusion2024-main\Model\BLIP-2"
 DINO_LOCAL_PATH = r"d:\projects\BlackScholesDiffusion2024-main\Model\DINOv2"
 SETS = ['set1', 'set2', 'set3', 'set4']
 METHODS = ['lininterp', 'alternating_sampling', 'clip_min', 'step', 'bs']
+RESULTS_DIR = os.environ.get("RESULTS_DIR", "result")
 
 METHOD_MAP = {
     'lininterp': 'Linear Int. [17]',
@@ -28,7 +29,7 @@ METHOD_MAP = {
 
 CONSTANTS = {
     'lininterp': {'Steps': 50, 'Time': 6.5, 'GPU': 0.001805, 'Mem': 7.1},
-    'alternating_sampling': {'Steps': 50, 'Time': 6.5, 'GPU': 0.001805, 'Mem': 7.7},
+    'alternating_sampling': {'Steps': 100, 'Time': 14, 'GPU': 0.00389, 'Mem': 7.7},
     'clip_min': {'Steps': 100, 'Time': 14, 'GPU': 0.00389, 'Mem': 7.7},
     'step': {'Steps': 100, 'Time': 14, 'GPU': 0.00389, 'Mem': 7.7},
     'bs': {'Steps': 100, 'Time': 14, 'GPU': 0.00389, 'Mem': 7.7}
@@ -54,7 +55,7 @@ def load_prompts(set_name):
 
 def get_vanilla_baseline_imgs(pid, set_name):
     """优先使用 text3/text4（论文基线），若不存在则回退到 text1/text2"""
-    base_path = f'results/{set_name}/{pid}/vanilla'
+    base_path = f'{RESULTS_DIR}/{set_name}/{pid}/vanilla'
     t3 = glob.glob(os.path.join(base_path, 'text3', '*.png'))
     t4 = glob.glob(os.path.join(base_path, 'text4', '*.png'))
     if t3 and t4:
@@ -98,7 +99,7 @@ for set_name in SETS:
         v_feat_avg = torch.stack(v_feats).mean(dim=0)
         
         for m in METHODS:
-            imgs = glob.glob(os.path.join(f'results/{set_name}/{pid}/{m}', '*.png'))
+            imgs = glob.glob(os.path.join(f'{RESULTS_DIR}/{set_name}/{pid}/{m}', '*.png'))
             if not imgs: continue
             
             m_feats = []

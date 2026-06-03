@@ -35,13 +35,17 @@ warnings.filterwarnings("ignore")
 DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
 SETS          = ["set1", "set2","set3","set4"]
 METHODS       = ["lininterp", "alternating_sampling", "clip_min", "step", "bs", "mpt"]
+RESULTS_DIR   = os.environ.get("RESULTS_DIR", "result")
+if not os.path.exists(RESULTS_DIR) and os.path.exists("results"):
+    print("[INFO] result/ not found; using existing results/ directory for evaluation.")
+    RESULTS_DIR = "results"
 METHOD_DISPLAY= {
     "lininterp":            "Linear Int.",
     "alternating_sampling": "Alt. Samp.",
     "clip_min":             "CLIP Min.",
     "step":                 "Step.",
     "bs":                   "Black Scholes",
-    "mpt":                  "Portfolio Diff.",
+    "mpt":                  "MPT / Ours",
 }
 
 # 运行时自动测量: 耗时(s) / GPU时(h) / 峰值显存(GB)
@@ -73,7 +77,7 @@ def load_prompts(set_name):
 
 
 def get_vanilla_imgs(pid, set_name):
-    base = f"results/{set_name}/{pid}/vanilla"
+    base = f"{RESULTS_DIR}/{set_name}/{pid}/vanilla"
     t3 = glob.glob(os.path.join(base, "text3", "*.png"))
     t4 = glob.glob(os.path.join(base, "text4", "*.png"))
     if t3 and t4:
@@ -84,7 +88,7 @@ def get_vanilla_imgs(pid, set_name):
 
 
 def get_method_imgs(pid, set_name, method):
-    return glob.glob(os.path.join(f"results/{set_name}/{pid}/{method}", "*.png"))
+    return glob.glob(os.path.join(f"{RESULTS_DIR}/{set_name}/{pid}/{method}", "*.png"))
 
 
 def get_peak_gpu_mem_gb():
@@ -150,6 +154,7 @@ def compute_kid_mmd(feat_real, feat_fake):
     return (sum_K_XX + sum_K_YY - 2 * sum_K_XY).item()
 
 print("All models loaded.\n")
+print(f"[INFO] Evaluating images from: {RESULTS_DIR}\n")
 
 # ── Metric Helpers ────────────────────────────────────────────────────────
 
@@ -197,6 +202,7 @@ for set_name in SETS:
     print(f"{'='*60}")
 
     acc = {m: {"clip_comp": [], "clip_add": [], "blip_dino_official": [], "blip_atomic": []} for m in METHODS}
+    evaluated_counts = {m: 0 for m in METHODS}
     
     # Set-level KID features
     set_real_feats = {m: [] for m in METHODS}
@@ -285,6 +291,7 @@ for set_name in SETS:
 
             acc[m]["clip_comp"].append(float(np.mean(clip_comp_scores)))
             acc[m]["clip_add"].append(float(np.mean(clip_add_scores)))
+            evaluated_counts[m] += 1
             
             # BLIP x DINO (Official)
             blip_official_avg = float(np.mean(blip_official_scores))
@@ -347,6 +354,8 @@ for set_name in SETS:
     for m in METHODS:
         r = set_means[m]
         print(f"{METHOD_DISPLAY[m]:<22} {r['blip_dino_official']:>16.4f} {r['blip_atomic']:>14.4f} {r['kid_set']:>10.5f}")
+        if evaluated_counts[m] == 0:
+            print(f"[WARN] {set_name}/{m}: no images evaluated. Check {RESULTS_DIR}/{set_name}/*/{m}/ and vanilla/text3,text4.")
 
     json_path = f"results_{set_name}_full.json"
     with open(json_path, "w") as f:

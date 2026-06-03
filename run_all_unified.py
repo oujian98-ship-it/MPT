@@ -21,6 +21,7 @@ TARGET_SETS = ["set1", "set2", "set3", "set4"]
 ENABLE_STAGE_1 = True 
 ENABLE_STAGE_2 = True
 ENABLE_STAGE_3 = False 
+RESULTS_DIR = os.environ.get("RESULTS_DIR", "result")
 
 # 我们把各种方法的差异化参数写死进配置字典，方便一次性循环
 METHODS_CONFIG = {
@@ -33,8 +34,8 @@ METHODS_CONFIG = {
     # clip_min: prompts[1:4] -> [1,2,3]，与原 run_batch_clip.py 第54行 prompts = prompts[1:4] 一致
     'clip_min':  {'custom': './models/clip_min',  'steps': 100, 'prompts_idx': [1,2,3], 'out_dirs': ['']},
     # alternating_sampling: prompts[2:4] -> [2,3]，与原 run_batch_altsamp.py 第54行 prompts = prompts[2:4] 一致
-    # 注意 pipeline 只接受2个 prompt，steps 原版是 50
-    'alternating_sampling': {'custom': './models/alternating_sampling', 'steps': 50, 'prompts_idx': [2,3], 'out_dirs': ['']},
+    # 注意 pipeline 只接受2个 prompt
+    'alternating_sampling': {'custom': './models/alternating_sampling', 'steps': 100, 'prompts_idx': [2,3], 'out_dirs': ['']},
     # step(promptmixing_iccv): pipeline 内部只读 eval_prompt[0] 和 [1]，所以同样传 [2,3] 两个独立概念
     'step': {'custom': './models/promptmixing_iccv', 'steps': 100, 'prompts_idx': [2,3], 'out_dirs': ['']}
 }
@@ -91,7 +92,7 @@ def stage1_generate_mixed():
                 if method == 'vanilla':
                     eval_prompt = p_list[0]
                     
-                base_savedir = f'./results/{cur_set}/{file_name}/{method}/'
+                base_savedir = f'./{RESULTS_DIR}/{cur_set}/{file_name}/{method}/'
                 
                 needs_generation = False
                 target_folders = []
@@ -152,7 +153,7 @@ def stage2_generate_baselines():
             file_name = raw_prompts[0]
             p_list = raw_prompts[1][1:-2].split(',')
             
-            base_savedir = f'./results/{cur_set}/{file_name}/vanilla/'
+            base_savedir = f'./{RESULTS_DIR}/{cur_set}/{file_name}/vanilla/'
             tf3 = f"{base_savedir}text3"
             tf4 = f"{base_savedir}text4"
             

@@ -18,7 +18,7 @@ import sys
 
 ALL_SETS   = ["set1", "set2", "set3", "set4"]
 ALL_METHODS = ["mpt"]
-RESULTS_DIR = "./results"
+RESULTS_DIR = os.environ.get("RESULTS_DIR", "result")
 
 
 def clear_method(method_name, target_sets=None):

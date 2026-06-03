@@ -7,7 +7,7 @@ Portfolio Diffusion (MPT) 批量推理脚本 — 自动生成 set1~set4 全部�
   python -u run_batch_mpt.py
 
 输出:
-  results/{set1~set4}/{file_name}/mpt/result1~5.png
+  result/{set1~set4}/{file_name}/mpt/result1~5.png
 
 与 run_batch_bs.py 的区别:
   - 使用 custom_pipeline='./models/mpt' (Portfolio Diffusion)
@@ -29,6 +29,7 @@ device = torch.device("cuda" if has_cuda else "cpu")
 
 # ── Configuration ──────────────────────────────────────────────
 ALL_SETS = ["set1", "set2", "set3", "set4"]
+RESULTS_DIR = os.environ.get("RESULTS_DIR", "result")
 
 # Local model paths
 model_dir = r"d:\projects\BlackScholesDiffusion2024-main\Model\Stable_Diffusion_2.1"
@@ -78,7 +79,7 @@ pipe = DiffusionPipeline.from_pretrained(
 
 def is_prompt_complete(set_name, file_name, num_images=5):
     """Check if a prompt already has all images generated."""
-    savedir = f"./results/{set_name}/{file_name}/mpt/"
+    savedir = f"./{RESULTS_DIR}/{set_name}/{file_name}/mpt/"
     for idx in range(1, num_images + 1):
         if not os.path.exists(f"{savedir}result{idx}.png"):
             return False
@@ -88,6 +89,8 @@ def is_prompt_complete(set_name, file_name, num_images=5):
 total_start = time.time()
 total_done = 0
 total_skipped = 0
+image_times = []
+peak_mem_gb = 0.0
 
 # ── Main Loop: iterate ALL sets ─────────────────────────────────
 for SET_NAME in ALL_SETS:
@@ -116,7 +119,7 @@ for SET_NAME in ALL_SETS:
         prompt_inner = prompt_full[1:-2]  # strip surrounding quotes
         concept_list = prompt_inner.split(",")
 
-        savedir = f"./results/{SET_NAME}/{file_name}/mpt/"
+        savedir = f"./{RESULTS_DIR}/{SET_NAME}/{file_name}/mpt/"
         os.makedirs(savedir, exist_ok=True)
 
         # ── Skip if already complete (断点续跑) ──
@@ -136,6 +139,9 @@ for SET_NAME in ALL_SETS:
             # ensures results are deterministic and comparable across methods.
             seed = i * 1000 + img_idx
             generator = torch.Generator(device.type).manual_seed(seed)
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
+            image_start = time.perf_counter()
             res = pipe(
                 guidance_scale=7.5,
                 num_inference_steps=100,
@@ -145,6 +151,9 @@ for SET_NAME in ALL_SETS:
             )
             image = res.images[0]
             image.save(savedir + f"/result{img_idx}.png")
+            image_times.append(time.perf_counter() - image_start)
+            if device.type == "cuda":
+                peak_mem_gb = max(peak_mem_gb, torch.cuda.max_memory_allocated(device) / (1024 ** 3))
         
         set_done += 1
         total_done += 1
@@ -158,6 +167,11 @@ for SET_NAME in ALL_SETS:
 total_elapsed = time.time() - total_start
 print(f"\n{'='*70}")
 print(f"ALL SETS COMPLETE! New: {total_done}, Skipped: {total_skipped}, Total time: {total_elapsed/60:.1f} min")
-print(f"Results: results/set{{1~4}}/*/mpt/")
+print(f"Results: {RESULTS_DIR}/set{{1~4}}/*/mpt/")
+if image_times:
+    avg_time_s = sum(image_times) / len(image_times)
+    print(f"MPT table values: Time(s)={avg_time_s:.2f}, GPU hrs={avg_time_s/3600:.6f}, Memory(GB)={peak_mem_gb:.2f}")
+else:
+    print("MPT table values: no new images were generated, so timing/memory were not measured.")
 print(f"Now run: python -u eval_per_set.py")
 print("=" * 70)

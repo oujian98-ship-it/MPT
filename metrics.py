@@ -2,6 +2,7 @@ import os
 import patch_torch
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID" 
 os.environ["CUDA_VISIBLE_DEVICES"]="0"
+RESULTS_DIR = os.environ.get("RESULTS_DIR", "result")
 
 import glob
 import torch 
@@ -51,12 +52,12 @@ for i in range(len(prompts_list)):
     prompts = prompts.split(',')
     print(prompts)
 
-    #savedir = './results/set4/' + file_name + '/vanilla/text2/' # Vanilla stable diffusion 
-    #savedir = './results/set4/' + file_name + '/bs/' # Black Scholes 
-    #savedir = './results/set4/' + file_name + '/alternating_sampling/' # Alternating Sampling 
-    savedir = './results/set3/' + file_name + '/lininterp/' # Linear Interpolation 
-    #savedir = './results/set4/' + file_name + '/clip_min/' # Min CLIP Score
-    #savedir = './results/set4/' + file_name + '/promptmixing_iccv/' # Prompt Mixing ICCV Paper 
+    #savedir = f'./{RESULTS_DIR}/set4/' + file_name + '/vanilla/text2/' # Vanilla stable diffusion 
+    #savedir = f'./{RESULTS_DIR}/set4/' + file_name + '/bs/' # Black Scholes 
+    #savedir = f'./{RESULTS_DIR}/set4/' + file_name + '/alternating_sampling/' # Alternating Sampling 
+    savedir = f'./{RESULTS_DIR}/set3/' + file_name + '/lininterp/' # Linear Interpolation 
+    #savedir = f'./{RESULTS_DIR}/set4/' + file_name + '/clip_min/' # Min CLIP Score
+    #savedir = f'./{RESULTS_DIR}/set4/' + file_name + '/promptmixing_iccv/' # Prompt Mixing ICCV Paper 
 
     max_clip_score2 = 0 
     

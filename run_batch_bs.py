@@ -23,6 +23,7 @@ device = torch.device('cuda' if has_cuda else 'cpu')
 # torch.hub.set_dir('/scratch0/') # 移除无效的 Linux 路径
 
 SET_NAME = os.environ.get("EXPERIMENT_SET", "set4")
+RESULTS_DIR = os.environ.get("RESULTS_DIR", "result")
 
 with open(f'data/{SET_NAME}.txt', 'r') as f:
     prompts_list = f.readlines()
@@ -56,7 +57,7 @@ for i in range(len(prompts_list)): # 恢复完整循环
     
     prompts = prompts[1:4]
 
-    savedir = f'./results/{SET_NAME}/' + file_name + '/bs/'
+    savedir = f'./{RESULTS_DIR}/{SET_NAME}/' + file_name + '/bs/'
     os.makedirs(savedir, exist_ok=True)
     eval_prompt = prompts
     res = pipe(guidance_scale=7.5, num_inference_steps=100, eval_prompt = eval_prompt)

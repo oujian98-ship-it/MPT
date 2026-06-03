@@ -5,6 +5,7 @@
 import os 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID" 
 os.environ["CUDA_VISIBLE_DEVICES"]="0"
+RESULTS_DIR = os.environ.get("RESULTS_DIR", "result")
 
 import glob
 import torch 
@@ -83,8 +84,8 @@ for i in range(len(prompts_list)):
     prompts = prompts.split(',')
     print(prompts)
 
-    savedir_gen = './results/set4/' + file_name # Gen Save Dir
-    savedir = './results/set4/' + file_name + '/bs/' # Black Scholes 
+    savedir_gen = f'./{RESULTS_DIR}/set4/' + file_name # Gen Save Dir
+    savedir = f'./{RESULTS_DIR}/set4/' + file_name + '/bs/' # Black Scholes 
 
     
     image_list = glob.glob(savedir + '*.png')

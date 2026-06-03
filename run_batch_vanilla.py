@@ -23,6 +23,7 @@ device = torch.device('cuda' if has_cuda else 'cpu')
 # torch.hub.set_dir('/scratch0/') # 移除无效的 Linux 路径
 
 SET_NAME = os.environ.get("EXPERIMENT_SET", "set4")
+RESULTS_DIR = os.environ.get("RESULTS_DIR", "result")
 
 with open(f'data/{SET_NAME}.txt', 'r') as f:
     prompts_list = f.readlines()
@@ -51,7 +52,7 @@ for i in range(len(prompts_list)):
     prompts = prompts.split(',')
     print(prompts)
     
-    savedir = f'./results/{SET_NAME}/' + file_name + '/vanilla/text1/'
+    savedir = f'./{RESULTS_DIR}/{SET_NAME}/' + file_name + '/vanilla/text1/'
 
     os.makedirs(savedir, exist_ok=True)
     eval_prompt = prompts[0]
@@ -71,7 +72,7 @@ for i in range(len(prompts_list)):
     image = res.images[0]
     image.save(savedir+'/result5.png')
 
-    savedir = f'./results/{SET_NAME}/' + file_name + '/vanilla/text2/'
+    savedir = f'./{RESULTS_DIR}/{SET_NAME}/' + file_name + '/vanilla/text2/'
     os.makedirs(savedir, exist_ok=True)
     eval_prompt = prompts[1]
     res = pipe(guidance_scale=7.5, num_inference_steps=50, eval_prompt = eval_prompt)
@@ -91,7 +92,7 @@ for i in range(len(prompts_list)):
     image.save(savedir+'/result5.png')
 
     '''
-    savedir = './results/set1/' + file_name + '/vanilla/text3/'
+    savedir = f'./{RESULTS_DIR}/set1/' + file_name + '/vanilla/text3/'
     os.makedirs(savedir, exist_ok=True)
     eval_prompt = prompts[2]
     res = pipe(guidance_scale=7.5, num_inference_steps=50, eval_prompt = eval_prompt)
@@ -110,7 +111,7 @@ for i in range(len(prompts_list)):
     image = res.images[0]
     image.save(savedir+'/result5.png')
 
-    savedir = './results/set1/' + file_name + '/vanilla/text4/'
+    savedir = f'./{RESULTS_DIR}/set1/' + file_name + '/vanilla/text4/'
     os.makedirs(savedir, exist_ok=True)
     eval_prompt = prompts[3]
     res = pipe(guidance_scale=7.5, num_inference_steps=50, eval_prompt = eval_prompt)
