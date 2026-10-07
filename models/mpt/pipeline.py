@@ -440,7 +440,7 @@ class ImagicStableDiffusionPipeline(DiffusionPipeline):
             feature_extractor=feature_extractor,
         )
         # Load CLIP once (shared across all __call__ invocations)
-        _clip_dir = r"d:\projects\BlackScholesDiffusion2024-main\Model\CLIP"
+        _clip_dir = r"Model\CLIP"
         print("[MPT] Loading CLIP model (one-time)...")
         try:
             _clip_device = self._execution_device

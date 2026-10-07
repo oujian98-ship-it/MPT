@@ -29,7 +29,7 @@ with open(f'data/{SET_NAME}.txt', 'r') as f:
     prompts_list = f.readlines()
 
 
-model_dir = r"d:\projects\BlackScholesDiffusion2024-main\Model\Stable_Diffusion_2.1"
+model_dir = r"Model\Stable_Diffusion_2.1"
 
 
 pipe = DiffusionPipeline.from_pretrained(

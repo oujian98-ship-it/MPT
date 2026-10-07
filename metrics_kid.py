@@ -1,6 +1,3 @@
-#https://huggingface.co/docs/transformers/main/en/model_doc/dinov2
-#https://github.com/facebookresearch/sscd-copy-detection
-#https://huggingface.co/docs/diffusers/conceptual/evaluation
 
 import os 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID" 

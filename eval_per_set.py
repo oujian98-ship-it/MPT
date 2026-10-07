@@ -56,9 +56,9 @@ METHOD_DISPLAY= {
     "mpt":                  "MPT / Ours",
 }
 
-BLIP_PATH = r"d:\projects\BlackScholesDiffusion2024-main\Model\BLIP-2"
-DINO_PATH = r"d:\projects\BlackScholesDiffusion2024-main\Model\DINOv2"
-CLIP_PATH = r"d:\projects\BlackScholesDiffusion2024-main\Model\CLIP"
+BLIP_PATH = r"Model\BLIP-2"
+DINO_PATH = r"Model\DINOv2"
+CLIP_PATH = r"Model\CLIP"
 LOG_DIR  = os.environ.get("LOG_DIR", "logs")
 LOG_FILE  = os.path.join(LOG_DIR, f"eval_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
 EVAL_OUTPUT_DIR = os.environ.get("EVAL_OUTPUT_DIR", ".")

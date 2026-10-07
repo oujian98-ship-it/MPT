@@ -17,7 +17,7 @@ import time
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID" 
 has_cuda = torch.cuda.is_available()
 device = torch.device('cuda' if has_cuda else 'cpu')
-model_dir = r"d:\projects\BlackScholesDiffusion2024-main\Model\Stable_Diffusion_2.1"
+model_dir = r"Model\Stable_Diffusion_2.1"
 
 
 TARGET_SETS = ["set1", "set2", "set3", "set4"] 

@@ -22,7 +22,7 @@ RUN_TS = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 EXPERIMENT_SEED = int(os.environ.get("EXPERIMENT_SEED", "0"))
 
 # Local model paths
-model_dir = r"d:\projects\BlackScholesDiffusion2024-main\Model\Stable_Diffusion_2.1"
+model_dir = r"Model\Stable_Diffusion_2.1"
 
 # MPT-specific configuration (can override defaults in pipeline.py)
 MPT_CONFIG = {

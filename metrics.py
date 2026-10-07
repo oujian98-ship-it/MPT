@@ -26,7 +26,7 @@ from transformers import (
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 
 # Load models
-clip_local_path = r"d:\projects\BlackScholesDiffusion2024-main\Model\CLIP"
+clip_local_path = r"Model\CLIP"
 clip_model = CLIPModel.from_pretrained(clip_local_path).cuda()
 clip_processor = CLIPProcessor.from_pretrained(clip_local_path)
 

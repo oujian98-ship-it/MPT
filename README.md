@@ -44,16 +44,16 @@ snapshot_download("facebook/dinov2-base", local_dir="Model/DINOv2")
 
 ## Path Configuration
 
-The code uses absolute local model paths, for example:
+Model paths are relative to the project root. Run commands from the project root, for example:
 
 ```text
-d:\projects\BlackScholesDiffusion2024-main\Model\Stable_Diffusion_2.1
-d:\projects\BlackScholesDiffusion2024-main\Model\CLIP
-d:\projects\BlackScholesDiffusion2024-main\Model\BLIP-2
-d:\projects\BlackScholesDiffusion2024-main\Model\DINOv2
+Model\Stable_Diffusion_2.1
+Model\CLIP
+Model\BLIP-2
+Model\DINOv2
 ```
 
-Update model paths in `run_all_unified.py`, `run_batch_mpt.py`, `eval_per_set.py`, and `run_batch_*.py` to match your local directory.
+Place downloaded models in the `Model/` directory under the project root, or update the model paths to match your setup.
 
 ## Generate Experiment Images
 

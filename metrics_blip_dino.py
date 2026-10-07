@@ -1,6 +1,3 @@
-#https://huggingface.co/docs/transformers/main/en/model_doc/dinov2
-#https://github.com/facebookresearch/sscd-copy-detection
-#https://huggingface.co/docs/diffusers/conceptual/evaluation
 
 import os 
 import patch_torch
@@ -25,7 +22,7 @@ from transformers import AutoImageProcessor, Dinov2Model, CLIPProcessor, CLIPMod
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-blip2_local_path = r"d:\projects\BlackScholesDiffusion2024-main\Model\BLIP-2"
+blip2_local_path = r"Model\BLIP-2"
 model = Blip2ForImageTextRetrieval.from_pretrained(blip2_local_path, torch_dtype=torch.float16)
 processor = AutoProcessor.from_pretrained(blip2_local_path)
 
@@ -33,7 +30,7 @@ processor = AutoProcessor.from_pretrained(blip2_local_path)
 model.to(device)
 
 # DINO
-dino_local_path = r"d:\projects\BlackScholesDiffusion2024-main\Model\DINOv2"
+dino_local_path = r"Model\DINOv2"
 image_processor = AutoImageProcessor.from_pretrained(dino_local_path)
 dino_model = Dinov2Model.from_pretrained(dino_local_path).cuda()
 
