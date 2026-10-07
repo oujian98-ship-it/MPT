@@ -98,27 +98,27 @@ def bs_score(spot, strike, rate, sigma, t):
 
 DEFAULT_MPT_CONFIG = {
     # --- Return coefficients ---
-    "alpha_lookahead": 0.3,   # α₁: 前瞻边际收益
-    "alpha_deficiency": 0.3,   # α₂: 当前缺失度
-    "alpha_history": 0.2,      # α₃: 历史 EMA 增益
-    "alpha_bs": 0.2,           # α₄: BS 紧迫性先验
+    "alpha_lookahead": 0.3,
+    "alpha_deficiency": 0.3,
+    "alpha_history": 0.2,
+    "alpha_bs": 0.2,
     # --- Risk coefficients ---
-    "beta_attn": 0.8,          # β₁: 注意力重叠风险
-    "beta_upd": 0.8,           # β₂: 更新冲突风险
-    "beta_inst": 0.5,          # β₃: 不稳定性风险
+    "beta_attn": 0.8,
+    "beta_upd": 0.8,
+    "beta_inst": 0.5,
     # --- Regularization ---
-    "lambda_r": 0.5,           # λ_r: 风险厌恶系数（整体风险惩罚缩放）
-    "gamma_bal": 0.1,          # γ: 平衡惩罚（概念间方差）
-    "tau_ent": 0.05,           # τ: 熵正则（防坍缩）
+    "lambda_r": 0.5,
+    "gamma_bal": 0.1,
+    "tau_ent": 0.05,
     # --- Time smoothing ---
-    "eta_max": 0.1,            # η_max: 时间平滑最大系数
-    "eta_power": 1.0,          # p: 调度指数
+    "eta_max": 0.1,
+    "eta_power": 1.0,
     # --- Solver ---
-    "rho": 0.5,                # ρ: 镜像下降学习率
-    "M_inner": 10,             # M: 内循环迭代次数
+    "rho": 0.5,
+    "M_inner": 10,
     # --- Warmup for instability risk ---
-    "warmup_steps": 10,        # t_warm: 前 N 步不启用 Σ^inst
-    "inst_window_size": 5,     # 滑动窗口长度
+    "warmup_steps": 10,
+    "inst_window_size": 5,
     # --- State scoring ---
     "lambda_clip_state": 1.0,  # λ_clip: CLIP state score weight
     "lambda_token_state": 0.3, # λ_token: token activation weight

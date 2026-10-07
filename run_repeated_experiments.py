@@ -29,27 +29,27 @@ def positive_int(value: str) -> int:
 
 def choose_interactively(args: argparse.Namespace) -> None:
     if args.mode is None:
-        print("\n请选择实验范围：")
-        print("  1. All Methods（所有 baseline + MPT）")
-        print("  2. Only MPT（仅报告 MPT；会额外生成 vanilla 参考图供评估使用）")
+        print("\nSelect the experiment scope:")
+        print("  1. All Methods (all baselines + MPT)")
+        print("  2. Only MPT (report MPT only; generate vanilla references for evaluation)")
         while True:
-            selection = input("输入 1 或 2 [1]: ").strip() or "1"
+            selection = input("Enter 1 or 2 [1]: ").strip() or "1"
             if selection == "1":
                 args.mode = "all"
                 break
             if selection == "2":
                 args.mode = "mpt"
                 break
-            print("请输入 1 或 2。")
+            print("Please enter 1 or 2.")
 
     if args.repeats is None:
         while True:
-            raw = input("重复次数（建议 3 或 5）[3]: ").strip() or "3"
+            raw = input("Repetitions (recommended: 3 or 5)[3]: ").strip() or "3"
             try:
                 args.repeats = positive_int(raw)
                 break
             except (ValueError, argparse.ArgumentTypeError):
-                print("请输入正整数，例如 3 或 5。")
+                print("Please enter a positive integer, such as 3 or 5.")
 
 
 def run_command(command: list[str], env: dict[str, str]) -> None:
@@ -81,7 +81,7 @@ def main() -> None:
     }
     (output_root / "experiment_manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    print(f"\n结果将保留在：{output_root}")
+    print(f"\nResults will be retained in:{output_root}")
     for run_number in range(1, args.repeats + 1):
         run_dir = output_root / f"run_{run_number:03d}"
         images_dir = run_dir / "images"
@@ -104,20 +104,20 @@ def main() -> None:
             "METHODS": "all" if args.mode == "all" else "mpt",
         })
 
-        print(f"\n{'=' * 78}\n开始第 {run_number}/{args.repeats} 轮，seed={run_seed}\n{'=' * 78}")
+        print(f"\n{'=' * 78}\nStarting run {run_number}/{args.repeats}, seed={run_seed}\n{'=' * 78}")
         try:
             run_command([sys.executable, "-u", "run_all_unified.py"], env)
             run_command([sys.executable, "-u", "run_batch_mpt.py"], env)
             run_command([sys.executable, "-u", "eval_per_set.py"], env)
         except subprocess.CalledProcessError as exc:
-            print(f"\n[FAILED] 第 {run_number} 轮中断（退出码 {exc.returncode}）。已生成的文件保留在：{run_dir}")
+            print(f"\n[FAILED] Run {run_number} failed (exit code {exc.returncode}). Generated files are retained in:{run_dir}")
             raise SystemExit(exc.returncode) from exc
 
     run_command(
         [sys.executable, "-u", "summarize_repeated_runs.py", str(output_root), "--error", args.error],
         os.environ.copy(),
     )
-    print(f"\n[DONE] 全部完成。最终汇总：{output_root / 'repeated_summary.md'}")
+    print(f"\n[DONE] All runs complete. Final summary:{output_root / 'repeated_summary.md'}")
 
 
 if __name__ == "__main__":

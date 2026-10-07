@@ -7,8 +7,8 @@ For each set in {set1, set2, set3, set4}, we compute two sets of metrics:
   - BLIP⊙DINO (Official): Uses compositional prompts (p0, p1), double-softmax BLIP, separate DINO processing.
 
 [Corrected Metrics] (More rigorous for new methods)
-  - CLIP-combined: CLIP(图像, 所有prompt组合成一个总prompt)
-  - CLIP-add: 平均 CLIP(图像, 每个单独概念prompt)
+  - CLIP-combined: CLIP(image, all prompts joined into one combined prompt)
+  - CLIP-add: mean CLIP(image, each individual concept prompt)
   - BLIP-atomic: Uses atomic prompts (p2, p3), single-softmax.
   - Set-Level KID: KernelInceptionDistance computed globally over all images in the set.
 

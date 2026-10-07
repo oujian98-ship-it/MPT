@@ -19,7 +19,7 @@ has_cuda = torch.cuda.is_available()
 device = torch.device('cuda' if has_cuda else 'cpu')
 model_dir = r"d:\projects\BlackScholesDiffusion2024-main\Model\Stable_Diffusion_2.1"
 
-# === 核心设定区 (可以在这里自由开关您想跑的任务) ===
+
 TARGET_SETS = ["set1", "set2", "set3", "set4"] 
 ENABLE_STAGE_1 = True 
 ENABLE_STAGE_2 = True
@@ -29,20 +29,20 @@ LOG_DIR = os.environ.get("LOG_DIR", "logs")
 RUN_TS = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 EXPERIMENT_SEED = int(os.environ.get("EXPERIMENT_SEED", "0"))
 
-# 我们把各种方法的差异化参数写死进配置字典，方便一次性循环
+
 ALL_METHODS_CONFIG = {
-    # vanilla 单独处理：text1 用 prompts[0]，text2 用 prompts[1]（与原 run_batch_vanilla.py 完全一致）
+
     'vanilla': {'custom': './models/vanilla', 'steps': 50,  'prompts_idx': [0, 1], 'out_dirs': ['text1', 'text2']},
-    # bs: prompts[1:4] -> [1,2,3]，与原 run_batch_bs.py 第57行 prompts = prompts[1:4] 一致
+
     'bs':      {'custom': './models/bs',      'steps': 100, 'prompts_idx': [1,2,3], 'out_dirs': ['']},
-    # lininterp: prompts[2:4] -> [2,3]，与原 run_batch_lininterp.py 第54行 prompts = prompts[2:4] 一致
+
     'lininterp': {'custom': './models/linear_interpolation', 'steps': 50, 'prompts_idx': [2,3], 'out_dirs': ['']},
-    # clip_min: prompts[1:4] -> [1,2,3]，与原 run_batch_clip.py 第54行 prompts = prompts[1:4] 一致
+
     'clip_min':  {'custom': './models/clip_min',  'steps': 100, 'prompts_idx': [1,2,3], 'out_dirs': ['']},
-    # alternating_sampling: prompts[2:4] -> [2,3]，与原 run_batch_altsamp.py 第54行 prompts = prompts[2:4] 一致
-    # 注意 pipeline 只接受2个 prompt
+
+
     'alternating_sampling': {'custom': './models/alternating_sampling', 'steps': 100, 'prompts_idx': [2,3], 'out_dirs': ['']},
-    # step(promptmixing_iccv): pipeline 内部只读 eval_prompt[0] 和 [1]，所以同样传 [2,3] 两个独立概念
+
     'step': {'custom': './models/promptmixing_iccv', 'steps': 100, 'prompts_idx': [2,3], 'out_dirs': ['']}
 }
 
@@ -68,7 +68,7 @@ def load_prompts(set_name):
         return f.readlines()
 
 def safe_load_pipeline(custom_path):
-    print(f"\n🚀 正在加载全新 Pipeline: {custom_path}")
+    print(f"\n Loading pipeline: {custom_path}")
     pipe = DiffusionPipeline.from_pretrained(
         model_dir,
         safety_checker=None,
@@ -79,7 +79,7 @@ def safe_load_pipeline(custom_path):
     return pipe
 
 def clear_vram(pipe):
-    print("🧹 释放显存，准备加载下一套模型...")
+    print(" Releasing GPU memory before loading the next model...")
     del pipe
     gc.collect()
     torch.cuda.empty_cache()
@@ -129,15 +129,15 @@ def write_generation_perf_log():
     log_path = os.path.join(LOG_DIR, f"generation_perf_run_all_{RUN_TS}.json")
     with open(log_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=4, ensure_ascii=False)
-    print(f"\n📄 生成效率日志已保存: {log_path}")
+    print(f"\n Generation performance log saved: {log_path}")
 
 def stage1_generate_mixed():
-    print(f"\n========== 开始第一阶段：跑满所有方法的混合主图 (text1, text2) ==========")
+    print(f"\n========== Stage 1: generate main images for all methods (text1, text2) ==========")
     
     for method, cfg in METHODS_CONFIG.items():
         pipe = None
         
-        # 针对当前这个 method(方法)，一口气跑完所有的 set！(省去了反复加载同一个大模型的成本)
+
         for set_index, cur_set in enumerate(TARGET_SETS):
             prompts_list = load_prompts(cur_set)
             
@@ -171,15 +171,15 @@ def stage1_generate_mixed():
                         break
                         
                 if not needs_generation:
-                    continue # 该目标的该方法已完善，跳过
+                    continue
                     
                 if pipe is None:
                     pipe = safe_load_pipeline(cfg['custom'])
                     
-                print(f"🔄 正在生成: {cur_set} -> {file_name} -> {method}")
+                print(f" Generating: {cur_set} -> {file_name} -> {method}")
                 
                 if method == 'vanilla':
-                    # Vanilla 特殊处理：text1 用 prompts[0]，text2 用 prompts[1]，分开生成
+
                     for folder_idx, out_f in enumerate(target_folders):
                         prompt_for_folder = p_list[folder_idx].strip().replace("'", "")
                         os.makedirs(out_f, exist_ok=True)
@@ -195,7 +195,7 @@ def stage1_generate_mixed():
                             res.images[0].save(out_path)
                             record_generation_perf(method, timer)
                 else:
-                    # 其他方法：直接把 eval_prompt 列表传给 pipeline
+
                     out_f = target_folders[0]
                     os.makedirs(out_f, exist_ok=True)
                     for gen_id in range(1, 6):
@@ -214,15 +214,15 @@ def stage1_generate_mixed():
             clear_vram(pipe)
 
 def stage2_generate_baselines():
-    print(f"\n========== 开始第二阶段：单独补齐原生基准分离图 (text3, text4) ==========")
+    print(f"\n========== Stage 2: complete vanilla reference images (text3, text4) ==========")
     if 'vanilla' not in METHODS_CONFIG:
-        print("[SKIP] vanilla 未在 METHODS_TO_RUN 中，无法生成 text3/text4 参考图。")
+        print("[SKIP] vanilla is not selected in METHODS_TO_RUN; cannot generate text3/text4 references.")
         return
     method = 'vanilla'
     cfg = METHODS_CONFIG[method]
     pipe = None
     
-    # 同样地，一个Vanilla模型扛下所有4个set的补图重任
+
     for set_index, cur_set in enumerate(TARGET_SETS):
         prompts_list = load_prompts(cur_set)
         
@@ -244,7 +244,7 @@ def stage2_generate_baselines():
             if pipe is None:
                 pipe = safe_load_pipeline(cfg['custom'])
                 
-            print(f"🔧 正在缝补基线: {cur_set} -> {file_name}")
+            print(f" Completing baseline: {cur_set} -> {file_name}")
             
             if needs_3 and len(p_list) > 2:
                 os.makedirs(tf3, exist_ok=True)
@@ -278,17 +278,17 @@ def stage2_generate_baselines():
         clear_vram(pipe)
 
 def stage3_evaluate_results():
-    print(f"\n========== 开始第三阶段：跨项目评估打分，生成最终成绩单 ==========")
+    print(f"\n========== Stage 3: evaluate results and generate the final table ==========")
     import subprocess
-    # 调用专门的评测脚本
+
     result = subprocess.run(["python", "-u", "reproduce_table1.py"])
     if result.returncode == 0:
-        print("✅ 成绩单 Table 1 评估完成！请查看 table1_reproduced.md")
+        print(" Table 1 evaluation complete. See table1_reproduced.md")
     else:
-        print("❌ 评测阶段出现异常。")
+        print(" Evaluation failed.")
 
 if __name__ == "__main__":
-    print("🌟 强力大一统统筹脚本已启动！")
+    print(" Unified workflow started.")
     if ENABLE_STAGE_1:
         stage1_generate_mixed()
     if ENABLE_STAGE_2:
@@ -297,4 +297,4 @@ if __name__ == "__main__":
         stage3_evaluate_results()
     
     write_generation_perf_log()
-    print("\n✅ 所有配置的工作流已彻底完成！")
+    print("\n All configured workflows are complete.")

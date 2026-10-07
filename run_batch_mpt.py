@@ -1,19 +1,4 @@
-"""
-run_batch_mpt.py
------------------
-Portfolio Diffusion (MPT) 批量推理脚本 — 自动生成 set1~set4 全部图像
-
-用法:
-  python -u run_batch_mpt.py
-
-输出:
-  result/{set1~set4}/{file_name}/mpt/result1~5.png
-
-与 run_batch_bs.py 的区别:
-  - 使用 custom_pipeline='./models/mpt' (Portfolio Diffusion)
-  - 每个 prompt 生成 5 张图（与 BS 一致）
-  - 结果保存在 mpt/ 子目录下，便于 eval_per_set.py 识别
-"""
+"""Generate five MPT images per prompt for set1 through set4. Usage: python -u run_batch_mpt.py. Outputs: result/{set_name}/{file_name}/mpt/result1.png through result5.png."""
 import os
 import patch_torch
 import time
@@ -41,25 +26,25 @@ model_dir = r"d:\projects\BlackScholesDiffusion2024-main\Model\Stable_Diffusion_
 
 # MPT-specific configuration (can override defaults in pipeline.py)
 MPT_CONFIG = {
-    # Return coefficients — 调大 alpha_bs 以更接近原始BS行为
+
     "alpha_lookahead": 0.2,
     "alpha_deficiency": 0.3,
     "alpha_history": 0.1,
-    "alpha_bs": 0.4,           # BS先验权重更高
+    "alpha_bs": 0.4,
     # Risk coefficients
     "beta_attn": 0.5,
     "beta_upd": 0.5,
     "beta_inst": 0.3,
     # Regularization
-    "lambda_r": 0.3,           # 降低风险厌恶，允许更多探索
+    "lambda_r": 0.3,
     "gamma_bal": 0.1,
     "tau_ent": 0.1,
     # Time smoothing (FIX: use eta_max + eta_power, PDF formula η_t = η_max*(step/T)^p)
     "eta_max": 0.05,           # was eta_base * eta_growth
     "eta_power": 1.0,
     # Solver
-    "rho": 0.3,                # 较小的学习率使权重变化平滑
-    "M_inner": 5,              # 减少内循环次数以加速
+    "rho": 0.3,
+    "M_inner": 5,
 }
 
 # ── Load Pipeline (once, shared across all sets) ────────────────
@@ -148,7 +133,7 @@ for set_index, SET_NAME in enumerate(ALL_SETS):
         savedir = os.path.join(RESULTS_DIR, SET_NAME, file_name, "mpt")
         os.makedirs(savedir, exist_ok=True)
 
-        # ── Skip if already complete (断点续跑) ──
+
         if is_prompt_complete(SET_NAME, file_name):
             print(f"  [{i+1}/{len(prompts_list)}] {file_name}  SKIP (already done)")
             set_skipped += 1

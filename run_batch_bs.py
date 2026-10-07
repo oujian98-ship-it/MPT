@@ -2,9 +2,9 @@ import os
 import patch_torch
 
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID" 
-# os.environ["CUDA_VISIBLE_DEVICES"]="4" # 注释掉硬编码的 GPU ID
 
-# from modelscope import snapshot_download # 移除在线下载
+
+
 
 import requests
 from PIL import Image
@@ -20,7 +20,7 @@ from scipy import ndimage
 has_cuda = torch.cuda.is_available()
 
 device = torch.device('cuda' if has_cuda else 'cpu')
-# torch.hub.set_dir('/scratch0/') # 移除无效的 Linux 路径
+
 
 SET_NAME = os.environ.get("EXPERIMENT_SET", "set4")
 RESULTS_DIR = os.environ.get("RESULTS_DIR", "result")
@@ -29,9 +29,9 @@ with open(f'data/{SET_NAME}.txt', 'r') as f:
     prompts_list = f.readlines()
 
 
-# prompts_list = prompts_list[40:] # 恢复完整运行，不再跳过
 
-# 使用本地模型路径
+
+
 model_dir = r"d:\projects\BlackScholesDiffusion2024-main\Model\Stable_Diffusion_2.1"
 
 
@@ -46,7 +46,7 @@ pipe = DiffusionPipeline.from_pretrained(
 generator = torch.Generator(device.type).manual_seed(0)
 seed = 0
 
-for i in range(len(prompts_list)): # 恢复完整循环
+for i in range(len(prompts_list)):
     prompts = prompts_list[i]
     prompts = prompts.split('\t')
     file_name = prompts[0]
